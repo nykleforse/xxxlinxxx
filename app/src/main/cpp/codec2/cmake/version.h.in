@@ -1,0 +1,15 @@
+/*---------------------------------------------------------------------------*\
+
+  Codec 2 VERSION #defines
+
+\*---------------------------------------------------------------------------*/
+
+#ifndef CODEC2_HAVE_VERSION
+#define CODEC2_HAVE_VERSION
+
+#define CODEC2_VERSION_MAJOR @CODEC2_VERSION_MAJOR@
+#define CODEC2_VERSION_MINOR @CODEC2_VERSION_MINOR@
+#cmakedefine CODEC2_VERSION_PATCH @CODEC2_VERSION_PATCH@
+#define CODEC2_VERSION "@CODEC2_VERSION@"
+
+#endif
