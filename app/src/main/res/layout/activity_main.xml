@@ -191,10 +191,12 @@
         </RadioGroup>
 
         <LinearLayout
+            android:id="@+id/callControls"
             android:layout_width="match_parent"
             android:layout_height="48dp"
             android:layout_marginTop="8dp"
-            android:orientation="horizontal">
+            android:orientation="horizontal"
+            android:visibility="gone">
 
             <Button
                 android:id="@+id/btnAccept"
@@ -236,26 +238,38 @@
             android:textColor="@color/text_primary"
             android:textSize="15sp" />
 
-        <EditText
-            android:id="@+id/messageInput"
-            android:layout_width="match_parent"
-            android:layout_height="48dp"
-            android:backgroundTint="@color/line"
-            android:hint="Message"
-            android:imeOptions="actionSend"
-            android:inputType="textCapSentences|textMultiLine"
-            android:maxLines="2"
-            android:textColor="@color/text_primary"
-            android:textColorHint="@color/text_muted" />
-
-        <Button
-            android:id="@+id/btnSend"
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="48dp"
             android:layout_marginTop="8dp"
-            android:backgroundTint="@color/control"
-        android:text="Send"
-        android:textColor="@color/text_primary" />
+            android:orientation="horizontal">
+
+            <EditText
+                android:id="@+id/messageInput"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:backgroundTint="@color/line"
+                android:hint="Message"
+                android:imeOptions="actionSend"
+                android:inputType="textCapSentences|textMultiLine"
+                android:maxLines="2"
+                android:textColor="@color/text_primary"
+                android:textColorHint="@color/text_muted" />
+
+            <Button
+                android:id="@+id/btnSend"
+                android:layout_width="52dp"
+                android:layout_height="match_parent"
+                android:layout_marginStart="8dp"
+                android:backgroundTint="@color/control"
+                android:minWidth="0dp"
+                android:minHeight="0dp"
+                android:padding="0dp"
+                android:text="^"
+                android:textColor="@color/text_primary"
+                android:textSize="20sp" />
+        </LinearLayout>
     </LinearLayout>
 
     <LinearLayout
@@ -319,6 +333,150 @@
                 android:layout_weight="1"
                 android:backgroundTint="@color/control"
                 android:text="Accept"
+                android:textColor="@color/text_primary" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/outgoingCallScreen"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@color/oled_black"
+        android:gravity="center"
+        android:orientation="vertical"
+        android:visibility="gone">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:text="Calling"
+            android:textColor="@color/text_secondary"
+            android:textSize="14sp" />
+
+        <TextView
+            android:id="@+id/outgoingCallName"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:gravity="center"
+            android:textColor="@color/text_primary"
+            android:textSize="28sp"
+            android:textStyle="bold"
+            tools:text="Alex" />
+
+        <TextView
+            android:id="@+id/outgoingCallCountdown"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:gravity="center"
+            android:text="30"
+            android:textColor="@color/text_primary"
+            android:textSize="54sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:text="seconds"
+            android:textColor="@color/text_muted"
+            android:textSize="13sp" />
+
+        <Button
+            android:id="@+id/btnCancelOutgoingCall"
+            android:layout_width="match_parent"
+            android:layout_height="56dp"
+            android:layout_marginTop="42dp"
+            android:backgroundTint="@color/control"
+            android:text="Cancel"
+            android:textColor="@color/text_primary" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/activeCallScreen"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@color/oled_black"
+        android:gravity="center_horizontal"
+        android:orientation="vertical"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/callTimer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="48dp"
+            android:gravity="center"
+            android:text="00:00"
+            android:textColor="@color/text_primary"
+            android:textSize="42sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/activeCallName"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:gravity="center"
+            android:textColor="@color/text_primary"
+            android:textSize="22sp"
+            android:textStyle="bold"
+            tools:text="Alex" />
+
+        <TextView
+            android:id="@+id/activeCallStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:gravity="center"
+            android:text="Connecting"
+            android:textColor="@color/text_secondary"
+            android:textSize="14sp" />
+
+        <Space
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="96dp"
+            android:layout_marginBottom="36dp"
+            android:gravity="center"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btnMuteMic"
+                android:layout_width="0dp"
+                android:layout_height="64dp"
+                android:layout_weight="1"
+                android:backgroundTint="@color/control"
+                android:minWidth="0dp"
+                android:text="Mic"
+                android:textColor="@color/text_primary" />
+
+            <Button
+                android:id="@+id/btnToggleSpeaker"
+                android:layout_width="0dp"
+                android:layout_height="64dp"
+                android:layout_marginStart="10dp"
+                android:layout_weight="1"
+                android:backgroundTint="@color/control"
+                android:minWidth="0dp"
+                android:text="Speaker"
+                android:textColor="@color/text_primary" />
+
+            <Button
+                android:id="@+id/btnEndActiveCall"
+                android:layout_width="0dp"
+                android:layout_height="64dp"
+                android:layout_marginStart="10dp"
+                android:layout_weight="1"
+                android:backgroundTint="@color/control"
+                android:minWidth="0dp"
+                android:text="End"
                 android:textColor="@color/text_primary" />
         </LinearLayout>
     </LinearLayout>

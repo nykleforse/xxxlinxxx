@@ -8,7 +8,11 @@ class Codec2Bridge(mode: Int = 3200) {
     fun samplesPerFrame(): Int = nativeSamplesPerFrame(handle)
     fun bytesPerFrame(): Int = nativeBytesPerFrame(handle)
 
-    fun release() = nativeDestroy(handle)
+    fun release() {
+        if (handle == 0L) return
+        nativeDestroy(handle)
+        handle = 0L
+    }
 
     private external fun nativeCreate(mode: Int): Long
     private external fun nativeDestroy(handle: Long)
