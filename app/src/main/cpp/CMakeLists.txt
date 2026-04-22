@@ -170,6 +170,10 @@ add_library(codec2_bridge SHARED
     codec2_bridge.cpp
 )
 
+target_link_options(codec2_bridge PRIVATE
+    "-Wl,-z,max-page-size=16384"
+)
+
 target_include_directories(codec2_bridge PRIVATE
     ${CODEC2_DIR}/src
     ${CODEC2_DIR}

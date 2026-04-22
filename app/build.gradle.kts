@@ -8,11 +8,12 @@ if (file("google-services.json").exists()) {
 }
 
 android {
-    namespace = "com.example.p2pcodec2"
+    namespace = "com.example.xxxlinkxxx"
     compileSdk = 34
+    ndkVersion = "26.1.10909125"
 
     defaultConfig {
-        applicationId = "com.example.p2pcodec2"
+        applicationId = "com.example.xxxlinkxxx"
         minSdk = 21
         targetSdk = 34
         versionCode = 1
@@ -24,6 +25,7 @@ android {
 
         // Разрешения для работы с аудио
         manifestPlaceholders["usesCleartextTraffic"] = true
+
     }
 
     buildTypes {
