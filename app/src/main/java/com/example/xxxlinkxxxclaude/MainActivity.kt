@@ -783,8 +783,12 @@ class MainActivity : AppCompatActivity() {
     private fun clearNotificationBadges() {
         unreadNotificationCount = 0
         prefs.edit().putInt(KEY_UNREAD_NOTIFICATION_COUNT, 0).apply()
-        notificationManager().cancel(NOTIFICATION_CALL_ID)
+        cancelIncomingCallNotification()
         notificationManager().cancelAll()
+    }
+
+    private fun cancelIncomingCallNotification() {
+        notificationManager().cancel(NOTIFICATION_CALL_ID)
     }
 
     private fun updateFirebaseControls() {
@@ -943,6 +947,7 @@ class MainActivity : AppCompatActivity() {
                         val callerId = pendingIncomingCall?.callerId
                         pendingIncomingCall = null
                         runOnUiThread {
+                            cancelIncomingCallNotification()
                             if (!callerId.isNullOrBlank()) remoteId = callerId
                             binding.addContactScreen.visibility = View.GONE
                             binding.incomingCallScreen.visibility = View.GONE
@@ -1010,6 +1015,7 @@ class MainActivity : AppCompatActivity() {
     private fun acceptIncoming(incoming: IncomingCall) {
         val firestore = firestoreOrWarn() ?: return
         if (offerProcessed) return
+        cancelIncomingCallNotification()
         offerProcessed = true
         dismissedIncomingSessions += incoming.sessionId
         removeListeners()
@@ -1071,9 +1077,11 @@ class MainActivity : AppCompatActivity() {
     private fun declinePendingIncoming() {
         val incoming = pendingIncomingCall ?: run {
             binding.incomingCallScreen.visibility = View.GONE
+            cancelIncomingCallNotification()
             returnToPostCallScreen()
             return
         }
+        cancelIncomingCallNotification()
         pendingIncomingCall = null
         dismissedIncomingSessions += incoming.sessionId
         db?.collection("calls")?.document(incoming.callId)?.update(
@@ -1169,6 +1177,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun finishCallAndReturn(message: String) {
+        cancelIncomingCallNotification()
         resetPeerConnection(createLocalChannels = false)
         binding.addContactScreen.visibility = View.GONE
         binding.incomingCallScreen.visibility = View.GONE
@@ -1582,6 +1591,7 @@ class MainActivity : AppCompatActivity() {
             )
 
             runOnUiThread {
+                cancelIncomingCallNotification()
                 resetPeerConnection(createLocalChannels = false)
                 returnToPostCallScreen()
                 showCallControls(false)
@@ -2025,6 +2035,7 @@ class MainActivity : AppCompatActivity() {
         val callId = currentCallId
         val sessionId = currentSessionId
         if (firestore == null || callId == null) {
+            cancelIncomingCallNotification()
             resetPeerConnection(createLocalChannels = false)
             returnToPostCallScreen()
             showCallControls(false)
@@ -2040,6 +2051,7 @@ class MainActivity : AppCompatActivity() {
                 "endedAt" to System.currentTimeMillis()
             )
         ).addOnCompleteListener {
+            cancelIncomingCallNotification()
             resetPeerConnection(createLocalChannels = false)
             returnToPostCallScreen()
             showCallControls(false)

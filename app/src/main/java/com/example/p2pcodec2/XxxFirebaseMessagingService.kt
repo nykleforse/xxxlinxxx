@@ -40,9 +40,14 @@ class XxxFirebaseMessagingService : FirebaseMessagingService() {
         createNotificationChannels()
         when (message.data["type"]) {
             "call" -> showCallNotification(message.data)
+            "call_cancel" -> cancelCallNotification()
             "message" -> showMessageNotification(message.data)
             else -> showFallbackNotification(message)
         }
+    }
+
+    private fun cancelCallNotification() {
+        notificationManager().cancel(NOTIFICATION_CALL_ID)
     }
 
     private fun showCallNotification(data: Map<String, String>) {

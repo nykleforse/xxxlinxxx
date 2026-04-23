@@ -33,22 +33,41 @@ exports.notifyIncomingCall = onDocumentWritten("calls/{callId}", async (event) =
 
   const call = after.data();
   const before = event.data.before && event.data.before.exists ? event.data.before.data() : null;
-  if (call.state !== "ringing") return;
-  if (before && before.state === "ringing" && before.sessionId === call.sessionId) return;
 
   const calleeId = call.calleeId;
   const callerId = call.callerId;
   if (!calleeId || !callerId || calleeId === callerId) return;
 
-  const token = await fcmTokenForUser(calleeId);
-  if (!token) return;
+  if (call.state === "ringing") {
+    if (before && before.state === "ringing" && before.sessionId === call.sessionId) return;
+    const token = await fcmTokenForUser(calleeId);
+    if (!token) return;
 
-  await sendToToken(token, {
-    type: "call",
-    callId: event.params.callId,
-    sessionId: String(call.sessionId || ""),
-    callerId,
-  });
+    await sendToToken(token, {
+      type: "call",
+      callId: event.params.callId,
+      sessionId: String(call.sessionId || ""),
+      callerId,
+    });
+    return;
+  }
+
+  if (call.state !== "ended" && call.state !== "declined") return;
+  if (before && before.state === call.state) return;
+
+  const cancelTargets = new Set([calleeId]);
+  if (call.state === "declined") cancelTargets.add(callerId);
+
+  await Promise.all([...cancelTargets].map(async (userId) => {
+    const token = await fcmTokenForUser(userId);
+    if (!token) return;
+    await sendToToken(token, {
+      type: "call_cancel",
+      callId: event.params.callId,
+      sessionId: String(call.sessionId || call.endedSessionId || call.declinedSessionId || ""),
+      state: String(call.state),
+    });
+  }));
 });
 
 async function fcmTokenForUser(userId) {
