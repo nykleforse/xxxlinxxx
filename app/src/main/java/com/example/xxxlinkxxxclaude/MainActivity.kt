@@ -14,6 +14,7 @@ import android.media.AudioTrack
 import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.AutomaticGainControl
 import android.media.audiofx.NoiseSuppressor
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.util.Base64
@@ -683,6 +684,16 @@ class MainActivity : AppCompatActivity() {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val callSound = notificationSound(R.raw.incomming_call)
+        val messageSound = notificationSound(R.raw.incomming_masege)
+        val callAudioAttributes = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+            .build()
+        val messageAudioAttributes = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+            .build()
         val callsChannel = NotificationChannel(
             NOTIFICATION_CALLS_CHANNEL_ID,
             "Calls",
@@ -690,6 +701,7 @@ class MainActivity : AppCompatActivity() {
         ).apply {
             description = "Incoming call alerts"
             enableVibration(true)
+            setSound(callSound, callAudioAttributes)
             setShowBadge(true)
             lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
         }
@@ -700,11 +712,15 @@ class MainActivity : AppCompatActivity() {
         ).apply {
             description = "Incoming message alerts"
             enableVibration(true)
+            setSound(messageSound, messageAudioAttributes)
             setShowBadge(true)
             lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
         }
         notificationManager().createNotificationChannels(listOf(callsChannel, messagesChannel))
     }
+
+    private fun notificationSound(resId: Int): Uri =
+        Uri.parse("android.resource://$packageName/$resId")
 
     private fun notificationManager(): NotificationManager =
         getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -729,7 +745,8 @@ class MainActivity : AppCompatActivity() {
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .setDefaults(NotificationCompat.DEFAULT_ALL)
+            .setDefaults(NotificationCompat.DEFAULT_VIBRATE)
+            .setSound(notificationSound(R.raw.incomming_call))
             .setVibrate(longArrayOf(0L, 250L, 150L, 250L))
             .setBadgeIconType(NotificationCompat.BADGE_ICON_SMALL)
             .setNumber(1)
@@ -753,7 +770,8 @@ class MainActivity : AppCompatActivity() {
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .setDefaults(NotificationCompat.DEFAULT_ALL)
+            .setDefaults(NotificationCompat.DEFAULT_VIBRATE)
+            .setSound(notificationSound(R.raw.incomming_masege))
             .setBadgeIconType(NotificationCompat.BADGE_ICON_SMALL)
             .setNumber(unreadNotificationCount)
             .setContentIntent(contentIntent())
@@ -2167,8 +2185,8 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_SEEN_MESSAGE_IDS = "seen_message_ids"
         private const val KEY_FCM_TOKEN = "fcm_token"
         private const val KEY_UNREAD_NOTIFICATION_COUNT = "unread_notification_count"
-        private const val NOTIFICATION_CALLS_CHANNEL_ID = "xxxlink_calls_v2"
-        private const val NOTIFICATION_MESSAGES_CHANNEL_ID = "xxxlink_messages_v2"
+        private const val NOTIFICATION_CALLS_CHANNEL_ID = "xxxlink_calls_v3"
+        private const val NOTIFICATION_MESSAGES_CHANNEL_ID = "xxxlink_messages_v3"
         private const val NOTIFICATION_CALL_ID = 5001
         private const val NOTIFICATION_MESSAGE_ID_BASE = 6000
         private const val METERED_TURN_USERNAME = "adf897ba2cd48862e125b3e7"

@@ -6,6 +6,8 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.media.AudioAttributes
+import android.net.Uri
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import com.example.xxxlinkxxx.R
@@ -54,7 +56,8 @@ class XxxFirebaseMessagingService : FirebaseMessagingService() {
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .setDefaults(NotificationCompat.DEFAULT_ALL)
+            .setDefaults(NotificationCompat.DEFAULT_VIBRATE)
+            .setSound(notificationSound(R.raw.incomming_call))
             .setVibrate(longArrayOf(0L, 250L, 150L, 250L, 150L, 500L))
             .setBadgeIconType(NotificationCompat.BADGE_ICON_SMALL)
             .setNumber(1)
@@ -79,7 +82,8 @@ class XxxFirebaseMessagingService : FirebaseMessagingService() {
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .setDefaults(NotificationCompat.DEFAULT_ALL)
+            .setDefaults(NotificationCompat.DEFAULT_VIBRATE)
+            .setSound(notificationSound(R.raw.incomming_masege))
             .setBadgeIconType(NotificationCompat.BADGE_ICON_SMALL)
             .setNumber(count)
             .setContentIntent(contentIntent())
@@ -98,6 +102,8 @@ class XxxFirebaseMessagingService : FirebaseMessagingService() {
             .setContentText(body)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setDefaults(NotificationCompat.DEFAULT_VIBRATE)
+            .setSound(notificationSound(R.raw.incomming_masege))
             .setBadgeIconType(NotificationCompat.BADGE_ICON_SMALL)
             .setNumber(count)
             .setContentIntent(contentIntent())
@@ -108,6 +114,16 @@ class XxxFirebaseMessagingService : FirebaseMessagingService() {
 
     private fun createNotificationChannels() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val callSound = notificationSound(R.raw.incomming_call)
+        val messageSound = notificationSound(R.raw.incomming_masege)
+        val callAudioAttributes = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+            .build()
+        val messageAudioAttributes = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+            .build()
         val callsChannel = NotificationChannel(
             NOTIFICATION_CALLS_CHANNEL_ID,
             "Calls",
@@ -115,6 +131,7 @@ class XxxFirebaseMessagingService : FirebaseMessagingService() {
         ).apply {
             description = "Incoming call alerts"
             enableVibration(true)
+            setSound(callSound, callAudioAttributes)
             setShowBadge(true)
             lockscreenVisibility = Notification.VISIBILITY_PUBLIC
         }
@@ -125,11 +142,15 @@ class XxxFirebaseMessagingService : FirebaseMessagingService() {
         ).apply {
             description = "Incoming message alerts"
             enableVibration(true)
+            setSound(messageSound, messageAudioAttributes)
             setShowBadge(true)
             lockscreenVisibility = Notification.VISIBILITY_PUBLIC
         }
         notificationManager().createNotificationChannels(listOf(callsChannel, messagesChannel))
     }
+
+    private fun notificationSound(resId: Int): Uri =
+        Uri.parse("android.resource://$packageName/$resId")
 
     private fun contentIntent(): PendingIntent {
         val intent = Intent(this, MainActivity::class.java).apply {
@@ -162,8 +183,8 @@ class XxxFirebaseMessagingService : FirebaseMessagingService() {
         private const val KEY_CONTACT_PREFIX = "contact_name_"
         private const val KEY_FCM_TOKEN = "fcm_token"
         private const val KEY_UNREAD_NOTIFICATION_COUNT = "unread_notification_count"
-        private const val NOTIFICATION_CALLS_CHANNEL_ID = "xxxlink_calls_v2"
-        private const val NOTIFICATION_MESSAGES_CHANNEL_ID = "xxxlink_messages_v2"
+        private const val NOTIFICATION_CALLS_CHANNEL_ID = "xxxlink_calls_v3"
+        private const val NOTIFICATION_MESSAGES_CHANNEL_ID = "xxxlink_messages_v3"
         private const val NOTIFICATION_CALL_ID = 5001
         private const val NOTIFICATION_MESSAGE_ID_BASE = 6000
         private const val NOTIFICATION_FALLBACK_ID = 7001
