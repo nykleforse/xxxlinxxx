@@ -1,0 +1,172 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isShortId(value) {
+      return value is string && value.matches('^[A-Z0-9]{4,32}$');
+    }
+
+    function isNonEmptyString(value, maxLength) {
+      return value is string && value.size() > 0 && value.size() <= maxLength;
+    }
+
+    function isOptionalString(field, maxLength) {
+      return !(field in request.resource.data) ||
+        request.resource.data[field] == null ||
+        isNonEmptyString(request.resource.data[field], maxLength);
+    }
+
+    function isClientMillis(value) {
+      return value is int && value > 0;
+    }
+
+    function callParticipant(data) {
+      return isShortId(data.callerId) &&
+        isShortId(data.calleeId) &&
+        data.callerId != data.calleeId;
+    }
+
+    match /users/{userId} {
+      allow get, list: if true;
+
+      allow create, update: if isShortId(userId) &&
+        request.resource.data.id == userId &&
+        request.resource.data.keys().hasOnly([
+          'id',
+          'messagePublicKey',
+          'keyAlgorithm',
+          'updatedAt',
+          'fcmToken',
+          'fcmUpdatedAt'
+        ]) &&
+        isOptionalString('messagePublicKey', 4096) &&
+        isOptionalString('keyAlgorithm', 64) &&
+        isOptionalString('fcmToken', 4096) &&
+        (!('updatedAt' in request.resource.data) || isClientMillis(request.resource.data.updatedAt)) &&
+        (!('fcmUpdatedAt' in request.resource.data) || isClientMillis(request.resource.data.fcmUpdatedAt));
+
+      allow delete: if false;
+    }
+
+    match /photoAccounts/{accountId} {
+      allow get: if accountId.matches('^[a-f0-9]{64}$');
+      allow list: if false;
+
+      allow create: if accountId.matches('^[a-f0-9]{64}$') &&
+        request.resource.data.keys().hasOnly(['localId', 'createdAt', 'updatedAt']) &&
+        isShortId(request.resource.data.localId) &&
+        isClientMillis(request.resource.data.createdAt) &&
+        isClientMillis(request.resource.data.updatedAt);
+
+      allow update, delete: if false;
+    }
+
+    match /messages/{messageId} {
+      allow get, list: if true;
+
+      allow create: if request.resource.data.keys().hasOnly([
+          'from',
+          'to',
+          'encryptedKey',
+          'iv',
+          'cipherText',
+          'messageAlgorithm',
+          'keyAlgorithm',
+          'createdAt'
+        ]) &&
+        isShortId(request.resource.data.from) &&
+        isShortId(request.resource.data.to) &&
+        request.resource.data.from != request.resource.data.to &&
+        isNonEmptyString(request.resource.data.encryptedKey, 4096) &&
+        isNonEmptyString(request.resource.data.iv, 256) &&
+        isNonEmptyString(request.resource.data.cipherText, 16384) &&
+        request.resource.data.messageAlgorithm == 'AES/GCM/NoPadding' &&
+        isNonEmptyString(request.resource.data.keyAlgorithm, 128) &&
+        isClientMillis(request.resource.data.createdAt);
+
+      allow update: if false;
+      allow delete: if resource.data.keys().hasAll(['to']) && isShortId(resource.data.to);
+    }
+
+    match /calls/{callId} {
+      allow get, list: if true;
+
+      allow create: if request.resource.data.keys().hasOnly([
+          'sessionId',
+          'callerId',
+          'calleeId',
+          'offer',
+          'mode',
+          'state',
+          'createdAt'
+        ]) &&
+        callParticipant(request.resource.data) &&
+        isNonEmptyString(request.resource.data.sessionId, 128) &&
+        isNonEmptyString(request.resource.data.offer, 327680) &&
+        request.resource.data.mode in ['comfy', 'base', 'Xtream'] &&
+        request.resource.data.state == 'ringing' &&
+        isClientMillis(request.resource.data.createdAt);
+
+      allow update: if callParticipant(resource.data) &&
+        request.resource.data.callerId == resource.data.callerId &&
+        request.resource.data.calleeId == resource.data.calleeId &&
+        request.resource.data.sessionId == resource.data.sessionId &&
+        request.resource.data.keys().hasOnly([
+          'sessionId',
+          'callerId',
+          'calleeId',
+          'offer',
+          'mode',
+          'state',
+          'createdAt',
+          'answer',
+          'answerMode',
+          'answerSessionId',
+          'answeredAt',
+          'endedBy',
+          'endedSessionId',
+          'endedReason',
+          'endedAt',
+          'declinedBy',
+          'declinedSessionId'
+        ]) &&
+        request.resource.data.state in ['ringing', 'answered', 'ended', 'declined'] &&
+        isOptionalString('answer', 327680) &&
+        isOptionalString('answerMode', 32) &&
+        isOptionalString('answerSessionId', 128) &&
+        isOptionalString('endedBy', 32) &&
+        isOptionalString('endedSessionId', 128) &&
+        isOptionalString('endedReason', 64) &&
+        isOptionalString('declinedBy', 32) &&
+        isOptionalString('declinedSessionId', 128) &&
+        (!('answeredAt' in request.resource.data) || isClientMillis(request.resource.data.answeredAt)) &&
+        (!('endedAt' in request.resource.data) || isClientMillis(request.resource.data.endedAt));
+
+      allow delete: if false;
+
+      match /candidates/{candidateId} {
+        allow get, list: if true;
+
+        allow create: if request.resource.data.keys().hasOnly([
+            'sessionId',
+            'sender',
+            'sdpMid',
+            'sdpMLineIndex',
+            'candidate'
+          ]) &&
+          isNonEmptyString(request.resource.data.sessionId, 128) &&
+          isShortId(request.resource.data.sender) &&
+          isOptionalString('sdpMid', 64) &&
+          request.resource.data.sdpMLineIndex is int &&
+          request.resource.data.sdpMLineIndex >= 0 &&
+          isNonEmptyString(request.resource.data.candidate, 4096);
+
+        allow update, delete: if false;
+      }
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
