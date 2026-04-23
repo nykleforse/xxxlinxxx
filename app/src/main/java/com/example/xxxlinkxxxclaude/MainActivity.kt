@@ -22,6 +22,7 @@ import android.util.Log
 import android.view.View
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -42,6 +43,7 @@ import java.nio.ByteOrder
 import java.security.KeyFactory
 import java.security.KeyPair
 import java.security.KeyPairGenerator
+import java.security.MessageDigest
 import java.security.PrivateKey
 import java.security.PublicKey
 import java.security.SecureRandom
@@ -114,6 +116,9 @@ class MainActivity : AppCompatActivity() {
     private var voicePlayed = 0
     private var currentSessionId: String? = null
     private val dismissedIncomingSessions = mutableSetOf<String>()
+    private val photoAuthPicker = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        uri?.let { authenticateWithPhoto(it) }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -122,13 +127,29 @@ class MainActivity : AppCompatActivity() {
         createNotificationChannel()
 
         prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        localId = getOrCreateLocalId()
+        initFirebase()
+        currentVoiceMode.codec2Mode?.let { codec2 = Codec2Bridge(it) }
+        binding.btnChooseAuthPhoto.setOnClickListener {
+            photoAuthPicker.launch("image/*")
+        }
+
+        val savedAccount = prefs.getString(KEY_PHOTO_ACCOUNT_DOC, null)
+        val savedId = prefs.getString(KEY_LOCAL_ID, null)
+        if (!savedAccount.isNullOrBlank() && !savedId.isNullOrBlank()) {
+            continueWithLocalIdentity(savedId)
+        } else {
+            showPhotoAuthScreen()
+        }
+    }
+
+    private fun continueWithLocalIdentity(id: String) {
+        localId = id
+        prefs.edit().putString(KEY_LOCAL_ID, localId).apply()
         ensureMessageKeyPair()
         receivedMessageIds += prefs.getStringSet(KEY_SEEN_MESSAGE_IDS, emptySet()).orEmpty()
         binding.myId.text = "Your ID: $localId"
-
-        initFirebase()
-        currentVoiceMode.codec2Mode?.let { codec2 = Codec2Bridge(it) }
+        binding.photoAuthScreen.visibility = View.GONE
+        binding.contactListScreen.visibility = View.VISIBLE
         if (hasRecordAudioPermission()) {
             startCore()
         } else {
@@ -138,6 +159,18 @@ class MainActivity : AppCompatActivity() {
                 REQ_RECORD_AUDIO
             )
         }
+    }
+
+    private fun showPhotoAuthScreen() {
+        binding.photoAuthScreen.visibility = View.VISIBLE
+        binding.contactListScreen.visibility = View.GONE
+        binding.addContactScreen.visibility = View.GONE
+        binding.chatScreen.visibility = View.GONE
+        binding.incomingCallScreen.visibility = View.GONE
+        binding.outgoingCallScreen.visibility = View.GONE
+        binding.activeCallScreen.visibility = View.GONE
+        binding.photoAuthStatus.text = "Select your account photo"
+        binding.btnChooseAuthPhoto.isEnabled = db != null
     }
 
     override fun onStart() {
@@ -206,7 +239,7 @@ class MainActivity : AppCompatActivity() {
         if (requestCode == REQ_RECORD_AUDIO &&
             grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
         ) {
-            startCore()
+            if (localId.isNotBlank()) startCore()
         } else {
             binding.status.text = "Microphone permission is required"
         }
@@ -433,15 +466,92 @@ class MainActivity : AppCompatActivity() {
         binding.status.text = "ID copied"
     }
 
+    private fun authenticateWithPhoto(uri: Uri) {
+        val firestore = db ?: run {
+            binding.photoAuthStatus.text = "Firebase is not ready"
+            return
+        }
+        binding.btnChooseAuthPhoto.isEnabled = false
+        binding.photoAuthStatus.text = "Reading photo"
+        ioScope.launch {
+            val accountDocId = runCatching { photoAccountDocumentId(uri) }
+            withContext(Dispatchers.Main) {
+                if (accountDocId.isFailure) {
+                    binding.photoAuthStatus.text = "Photo read failed"
+                    binding.btnChooseAuthPhoto.isEnabled = true
+                    return@withContext
+                }
+                binding.photoAuthStatus.text = "Checking account"
+            }
+
+            val docId = accountDocId.getOrThrow()
+            firestore.collection(PHOTO_ACCOUNTS_COLLECTION).document(docId).get()
+                .addOnSuccessListener { document ->
+                    val restoredId = document.getString("localId")?.takeIf { it.isNotBlank() }
+                    if (restoredId != null) {
+                        savePhotoAccount(docId, restoredId)
+                        continueWithLocalIdentity(restoredId)
+                        return@addOnSuccessListener
+                    }
+
+                    val id = prefs.getString(KEY_LOCAL_ID, null)?.takeIf { it.isNotBlank() }
+                        ?: generateLocalId()
+                    firestore.collection(PHOTO_ACCOUNTS_COLLECTION).document(docId).set(
+                        mapOf(
+                            "localId" to id,
+                            "createdAt" to System.currentTimeMillis(),
+                            "updatedAt" to System.currentTimeMillis()
+                        ),
+                        SetOptions.merge()
+                    ).addOnSuccessListener {
+                        savePhotoAccount(docId, id)
+                        continueWithLocalIdentity(id)
+                    }.addOnFailureListener { error ->
+                        binding.photoAuthStatus.text = "Account save failed: ${error.message}"
+                        binding.btnChooseAuthPhoto.isEnabled = true
+                    }
+                }
+                .addOnFailureListener { error ->
+                    binding.photoAuthStatus.text = "Account check failed: ${error.message}"
+                    binding.btnChooseAuthPhoto.isEnabled = true
+                }
+        }
+    }
+
+    private fun savePhotoAccount(docId: String, id: String) {
+        prefs.edit()
+            .putString(KEY_PHOTO_ACCOUNT_DOC, docId)
+            .putString(KEY_LOCAL_ID, id)
+            .apply()
+    }
+
+    private fun photoAccountDocumentId(uri: Uri): String {
+        val photoBytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            ?: error("empty photo")
+        val photoHash = sha256(photoBytes)
+        return sha256("$PHOTO_ACCOUNT_SALT:${hex(photoHash)}".toByteArray(Charsets.UTF_8)).let(::hex)
+    }
+
     private fun getOrCreateLocalId(): String {
         prefs.getString(KEY_LOCAL_ID, null)?.let { return it }
+        val generated = generateLocalId()
+        prefs.edit().putString(KEY_LOCAL_ID, generated).apply()
+        return generated
+    }
+
+    private fun generateLocalId(): String {
         val generated = UUID.randomUUID().toString()
             .replace("-", "")
             .take(8)
             .uppercase(Locale.US)
-        prefs.edit().putString(KEY_LOCAL_ID, generated).apply()
         return generated
     }
+
+    private fun sha256(bytes: ByteArray): ByteArray =
+        MessageDigest.getInstance("SHA-256").digest(bytes)
+
+    private fun hex(bytes: ByteArray): String =
+        bytes.joinToString(separator = "") { "%02x".format(it) }
 
     private fun ensureMessageKeyPair() {
         if (prefs.contains(KEY_MESSAGE_PUBLIC_KEY) && prefs.contains(KEY_MESSAGE_PRIVATE_KEY)) return
@@ -2189,6 +2299,7 @@ class MainActivity : AppCompatActivity() {
         private const val LOG_TAG = "XxxLinkCall"
         private const val PREFS_NAME = "xxxlink_prefs"
         private const val KEY_LOCAL_ID = "local_id"
+        private const val KEY_PHOTO_ACCOUNT_DOC = "photo_account_doc"
         private const val KEY_MESSAGE_PUBLIC_KEY = "message_public_key"
         private const val KEY_MESSAGE_PRIVATE_KEY = "message_private_key"
         private const val KEY_CONTACT_IDS = "contact_ids"
@@ -2197,6 +2308,8 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_SEEN_MESSAGE_IDS = "seen_message_ids"
         private const val KEY_FCM_TOKEN = "fcm_token"
         private const val KEY_UNREAD_NOTIFICATION_COUNT = "unread_notification_count"
+        private const val PHOTO_ACCOUNTS_COLLECTION = "photoAccounts"
+        private const val PHOTO_ACCOUNT_SALT = "x-link-photo-account-v1"
         private const val NOTIFICATION_CALLS_CHANNEL_ID = "xxxlink_calls_v3"
         private const val NOTIFICATION_MESSAGES_CHANNEL_ID = "xxxlink_messages_v3"
         private const val NOTIFICATION_CALL_ID = 5001
