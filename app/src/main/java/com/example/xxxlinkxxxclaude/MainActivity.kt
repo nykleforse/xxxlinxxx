@@ -4,6 +4,8 @@ import android.Manifest
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -30,6 +32,8 @@ import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.FirebaseFirestoreSettings
 import com.google.firebase.firestore.ListenerRegistration
+import com.google.firebase.firestore.SetOptions
+import com.google.firebase.messaging.FirebaseMessaging
 import kotlinx.coroutines.*
 import org.webrtc.*
 import java.nio.ByteBuffer
@@ -68,6 +72,7 @@ class MainActivity : AppCompatActivity() {
     private var callTimerJob: Job? = null
     private var callTimeoutJob: Job? = null
     private var appInForeground = false
+    private var unreadNotificationCount = 0
 
     private var localId = ""
     private var remoteId = ""
@@ -137,6 +142,7 @@ class MainActivity : AppCompatActivity() {
     override fun onStart() {
         super.onStart()
         appInForeground = true
+        clearNotificationBadges()
     }
 
     override fun onStop() {
@@ -166,6 +172,7 @@ class MainActivity : AppCompatActivity() {
         bindUI()
         requestNotificationPermissionIfNeeded()
         publishPublicMessageKey()
+        syncFcmRegistrationToken()
         listenIncomingCalls()
         startMessagePolling()
     }
@@ -370,6 +377,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun bindUI() {
         binding.btnBack.setOnClickListener { showContactList() }
+        binding.btnOpenAddContact.setOnClickListener { showAddContactScreen() }
+        binding.btnBackFromAddContact.setOnClickListener { showContactList() }
+        binding.btnCopyMyId.setOnClickListener { copyLocalId() }
         binding.btnCall.setOnClickListener {
             call()
         }
@@ -416,6 +426,12 @@ class MainActivity : AppCompatActivity() {
         updateFirebaseControls()
     }
 
+    private fun copyLocalId() {
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("Your ID", localId))
+        binding.status.text = "ID copied"
+    }
+
     private fun getOrCreateLocalId(): String {
         prefs.getString(KEY_LOCAL_ID, null)?.let { return it }
         val generated = UUID.randomUUID().toString()
@@ -451,16 +467,40 @@ class MainActivity : AppCompatActivity() {
     private fun publishPublicMessageKey() {
         val firestore = db ?: return
         val publicKey = prefs.getString(KEY_MESSAGE_PUBLIC_KEY, null) ?: return
-        firestore.collection("users").document(localId).set(
-            mapOf(
+        val userData = mutableMapOf<String, Any>(
                 "id" to localId,
                 "messagePublicKey" to publicKey,
                 "keyAlgorithm" to RSA_KEY_ALGORITHM,
                 "updatedAt" to System.currentTimeMillis()
-            )
-        ).addOnFailureListener { error ->
+        )
+        prefs.getString(KEY_FCM_TOKEN, null)?.takeIf { it.isNotBlank() }?.let {
+            userData["fcmToken"] = it
+            userData["fcmUpdatedAt"] = System.currentTimeMillis()
+        }
+        firestore.collection("users").document(localId).set(userData, SetOptions.merge())
+            .addOnFailureListener { error ->
             updateDebugStatus("key publish failed: ${error.message}")
         }
+    }
+
+    private fun syncFcmRegistrationToken() {
+        FirebaseMessaging.getInstance().token
+            .addOnSuccessListener { token ->
+                prefs.edit().putString(KEY_FCM_TOKEN, token).apply()
+                db?.collection("users")?.document(localId)?.set(
+                    mapOf(
+                        "id" to localId,
+                        "fcmToken" to token,
+                        "fcmUpdatedAt" to System.currentTimeMillis()
+                    ),
+                    SetOptions.merge()
+                )?.addOnFailureListener { error ->
+                    updateDebugStatus("fcm token save failed: ${error.message}")
+                }
+            }
+            .addOnFailureListener { error ->
+                updateDebugStatus("fcm token failed: ${error.message}")
+            }
     }
 
     private fun normalizeId(value: String): String =
@@ -529,7 +569,7 @@ class MainActivity : AppCompatActivity() {
 
         contacts.forEach { id ->
             val item = TextView(this).apply {
-                text = "${contactName(id)}\n$id"
+                text = contactName(id)
                 setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_primary))
                 textSize = 16f
                 setPadding(18, 16, 18, 16)
@@ -548,12 +588,24 @@ class MainActivity : AppCompatActivity() {
 
     private fun showContactList() {
         binding.contactListScreen.visibility = View.VISIBLE
+        binding.addContactScreen.visibility = View.GONE
         binding.chatScreen.visibility = View.GONE
         binding.incomingCallScreen.visibility = View.GONE
         binding.outgoingCallScreen.visibility = View.GONE
         binding.activeCallScreen.visibility = View.GONE
         showCallControls(false)
         renderContacts()
+    }
+
+    private fun showAddContactScreen() {
+        binding.contactListScreen.visibility = View.GONE
+        binding.addContactScreen.visibility = View.VISIBLE
+        binding.chatScreen.visibility = View.GONE
+        binding.incomingCallScreen.visibility = View.GONE
+        binding.outgoingCallScreen.visibility = View.GONE
+        binding.activeCallScreen.visibility = View.GONE
+        showCallControls(false)
+        binding.addContactIdInput.requestFocus()
     }
 
     private fun returnToPostCallScreen() {
@@ -567,9 +619,9 @@ class MainActivity : AppCompatActivity() {
     private fun openChat(id: String) {
         remoteId = id
         binding.chatTitle.text = contactName(id)
-        binding.chatPeerId.text = id
         binding.messages.text = messageLogFor(id).toString()
         binding.contactListScreen.visibility = View.GONE
+        binding.addContactScreen.visibility = View.GONE
         binding.chatScreen.visibility = View.VISIBLE
         binding.incomingCallScreen.visibility = View.GONE
         binding.outgoingCallScreen.visibility = View.GONE
@@ -585,6 +637,7 @@ class MainActivity : AppCompatActivity() {
     private fun showActiveCallScreen() {
         if (remoteId.isBlank()) return
         binding.contactListScreen.visibility = View.GONE
+        binding.addContactScreen.visibility = View.GONE
         binding.chatScreen.visibility = View.GONE
         binding.incomingCallScreen.visibility = View.GONE
         binding.outgoingCallScreen.visibility = View.GONE
@@ -598,6 +651,7 @@ class MainActivity : AppCompatActivity() {
     private fun showOutgoingCallScreen(secondsLeft: Int = CALL_SETUP_TIMEOUT_SECONDS) {
         if (remoteId.isBlank()) return
         binding.contactListScreen.visibility = View.GONE
+        binding.addContactScreen.visibility = View.GONE
         binding.chatScreen.visibility = View.GONE
         binding.incomingCallScreen.visibility = View.GONE
         binding.activeCallScreen.visibility = View.GONE
@@ -629,15 +683,27 @@ class MainActivity : AppCompatActivity() {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        val channel = NotificationChannel(
-            NOTIFICATION_CHANNEL_ID,
-            "Messages and calls",
+        val callsChannel = NotificationChannel(
+            NOTIFICATION_CALLS_CHANNEL_ID,
+            "Calls",
             NotificationManager.IMPORTANCE_HIGH
         ).apply {
-            description = "Incoming messages and calls"
+            description = "Incoming call alerts"
             enableVibration(true)
+            setShowBadge(true)
+            lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
         }
-        notificationManager().createNotificationChannel(channel)
+        val messagesChannel = NotificationChannel(
+            NOTIFICATION_MESSAGES_CHANNEL_ID,
+            "Messages",
+            NotificationManager.IMPORTANCE_HIGH
+        ).apply {
+            description = "Incoming message alerts"
+            enableVibration(true)
+            setShowBadge(true)
+            lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
+        }
+        notificationManager().createNotificationChannels(listOf(callsChannel, messagesChannel))
     }
 
     private fun notificationManager(): NotificationManager =
@@ -656,33 +722,51 @@ class MainActivity : AppCompatActivity() {
         if (appInForeground || !hasNotificationPermission()) return
         val callerName = contactName(incoming.callerId)
         val intent = contentIntent()
-        val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+        val notification = NotificationCompat.Builder(this, NOTIFICATION_CALLS_CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle("Incoming call")
             .setContentText(callerName)
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setDefaults(NotificationCompat.DEFAULT_ALL)
+            .setVibrate(longArrayOf(0L, 250L, 150L, 250L))
+            .setBadgeIconType(NotificationCompat.BADGE_ICON_SMALL)
+            .setNumber(1)
             .setContentIntent(intent)
             .setFullScreenIntent(intent, true)
             .setAutoCancel(true)
+            .setOngoing(true)
             .build()
         notificationManager().notify(NOTIFICATION_CALL_ID, notification)
     }
 
     private fun notifyIncomingMessage(senderId: String, text: String) {
         if (appInForeground || !hasNotificationPermission()) return
+        unreadNotificationCount += 1
         val senderName = contactName(senderId)
-        val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+        val notification = NotificationCompat.Builder(this, NOTIFICATION_MESSAGES_CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle(senderName)
             .setContentText(text)
             .setStyle(NotificationCompat.BigTextStyle().bigText(text))
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setDefaults(NotificationCompat.DEFAULT_ALL)
+            .setBadgeIconType(NotificationCompat.BADGE_ICON_SMALL)
+            .setNumber(unreadNotificationCount)
             .setContentIntent(contentIntent())
             .setAutoCancel(true)
             .build()
         notificationManager().notify((NOTIFICATION_MESSAGE_ID_BASE + senderId.hashCode()).absoluteValue, notification)
+    }
+
+    private fun clearNotificationBadges() {
+        unreadNotificationCount = 0
+        prefs.edit().putInt(KEY_UNREAD_NOTIFICATION_COUNT, 0).apply()
+        notificationManager().cancel(NOTIFICATION_CALL_ID)
+        notificationManager().cancelAll()
     }
 
     private fun updateFirebaseControls() {
@@ -838,11 +922,19 @@ class MainActivity : AppCompatActivity() {
 
                 if (document == null) {
                     if (pendingIncomingCall != null) {
+                        val callerId = pendingIncomingCall?.callerId
                         pendingIncomingCall = null
                         runOnUiThread {
+                            if (!callerId.isNullOrBlank()) remoteId = callerId
+                            binding.addContactScreen.visibility = View.GONE
                             binding.incomingCallScreen.visibility = View.GONE
+                            binding.outgoingCallScreen.visibility = View.GONE
+                            binding.activeCallScreen.visibility = View.GONE
+                            returnToPostCallScreen()
                             binding.status.text = "Incoming call ended"
-                            binding.chatStatus.text = "Incoming call ended"
+                            if (binding.chatScreen.visibility == View.VISIBLE) {
+                                binding.chatStatus.text = "Incoming call ended"
+                            }
                         }
                     }
                     return@addSnapshotListener
@@ -861,10 +953,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showIncomingCall(incoming: IncomingCall) {
+        remoteId = incoming.callerId
         val callerName = contactName(incoming.callerId)
         binding.incomingCallerName.text = callerName
         binding.incomingCallerId.text = incoming.callerId
         binding.contactListScreen.visibility = View.GONE
+        binding.addContactScreen.visibility = View.GONE
         binding.chatScreen.visibility = View.GONE
         binding.activeCallScreen.visibility = View.GONE
         binding.outgoingCallScreen.visibility = View.GONE
@@ -959,6 +1053,7 @@ class MainActivity : AppCompatActivity() {
     private fun declinePendingIncoming() {
         val incoming = pendingIncomingCall ?: run {
             binding.incomingCallScreen.visibility = View.GONE
+            returnToPostCallScreen()
             return
         }
         pendingIncomingCall = null
@@ -970,9 +1065,8 @@ class MainActivity : AppCompatActivity() {
                 "declinedSessionId" to incoming.sessionId
             )
         )
-        binding.incomingCallScreen.visibility = View.GONE
-        binding.status.text = "Declined ${contactName(incoming.callerId)}"
-        binding.chatStatus.text = "Declined ${contactName(incoming.callerId)}"
+        remoteId = incoming.callerId
+        finishCallAndReturn("Declined ${contactName(incoming.callerId)}")
     }
 
     private fun rememberContact(id: String) {
@@ -994,7 +1088,9 @@ class MainActivity : AppCompatActivity() {
                 }
                 val state = snap?.getString("state") ?: return@addSnapshotListener
                 if (state == "declined") {
-                    updateDebugStatus("declined by ${contactName(remoteId)}")
+                    val declinedSessionId = snap.getString("declinedSessionId")
+                    if (declinedSessionId != null && declinedSessionId != currentSessionId) return@addSnapshotListener
+                    runOnUiThread { finishCallAndReturn("Declined by ${contactName(remoteId)}") }
                     return@addSnapshotListener
                 }
                 if (state == "ended" && snap.getString("endedBy") != localId) {
@@ -1032,23 +1128,41 @@ class MainActivity : AppCompatActivity() {
                     updateDebugStatus("call end listen failed: ${error.message}")
                     return@addSnapshotListener
                 }
-                if (snap?.getString("state") != "ended") return@addSnapshotListener
-                if (snap.getString("endedBy") == localId) return@addSnapshotListener
+                val state = snap?.getString("state") ?: return@addSnapshotListener
+                if (state != "ended" && state != "declined") return@addSnapshotListener
+                if (snap.getString("endedBy") == localId || snap.getString("declinedBy") == localId) return@addSnapshotListener
                 val endedSessionId = snap.getString("endedSessionId")
                 if (endedSessionId != null && sessionId != null && endedSessionId != sessionId) return@addSnapshotListener
-                runOnUiThread { endRemoteCall() }
+                val declinedSessionId = snap.getString("declinedSessionId")
+                if (declinedSessionId != null && sessionId != null && declinedSessionId != sessionId) return@addSnapshotListener
+                runOnUiThread {
+                    if (state == "declined") {
+                        finishCallAndReturn("Call declined")
+                    } else {
+                        finishCallAndReturn("Call ended")
+                    }
+                }
             }
         addListener(listener)
     }
 
     private fun endRemoteCall() {
+        finishCallAndReturn("Call ended")
+    }
+
+    private fun finishCallAndReturn(message: String) {
         resetPeerConnection(createLocalChannels = false)
+        binding.addContactScreen.visibility = View.GONE
         binding.incomingCallScreen.visibility = View.GONE
         binding.outgoingCallScreen.visibility = View.GONE
         binding.activeCallScreen.visibility = View.GONE
         returnToPostCallScreen()
         showCallControls(false)
-        updateDebugStatus("call ended")
+        binding.status.text = message
+        if (binding.chatScreen.visibility == View.VISIBLE) {
+            binding.chatStatus.text = message
+        }
+        updateDebugStatus(message.lowercase(Locale.US))
     }
 
     private fun setupVoiceReceiver(dc: DataChannel) {
@@ -1618,7 +1732,7 @@ class MainActivity : AppCompatActivity() {
                         } else {
                             buf.copyOf(frameSize)
                         }
-                        val prepared = if (mode.rawPcm) source else preparePcmForCodec2(source)
+                        val prepared = if (mode.rawPcm) source else preparePcmForCodec2(source, mode)
                         val encoded = if (mode.rawPcm) {
                             pcmToBytes(prepared)
                         } else {
@@ -1725,15 +1839,23 @@ class MainActivity : AppCompatActivity() {
         automaticGainControl = null
     }
 
-    private fun preparePcmForCodec2(source: ShortArray): ShortArray {
+    private fun preparePcmForCodec2(source: ShortArray, mode: VoiceMode): ShortArray {
         var sumSquares = 0.0
         for (sample in source) {
             sumSquares += (sample.toDouble() * sample.toDouble())
         }
         val rms = kotlin.math.sqrt(sumSquares / source.size.toDouble())
+        val targetRms = when (mode) {
+            VoiceMode.BASE -> CODEC2_BASE_TARGET_RMS
+            else -> CODEC2_TARGET_RMS
+        }
+        val maxGain = when (mode) {
+            VoiceMode.BASE -> CODEC2_BASE_MAX_GAIN
+            else -> CODEC2_MAX_GAIN
+        }
         val gain = when {
             rms < 1.0 -> 1.0
-            else -> (CODEC2_TARGET_RMS / rms).coerceIn(0.65, CODEC2_MAX_GAIN)
+            else -> (targetRms / rms).coerceIn(0.65, maxGain)
         }
 
         val output = ShortArray(source.size)
@@ -1873,6 +1995,7 @@ class MainActivity : AppCompatActivity() {
         if (!createLocalChannels) {
             runOnUiThread {
                 showCallControls(false)
+                binding.addContactScreen.visibility = View.GONE
                 binding.outgoingCallScreen.visibility = View.GONE
                 binding.activeCallScreen.visibility = View.GONE
             }
@@ -1974,7 +2097,6 @@ class MainActivity : AppCompatActivity() {
         )
         runOnUiThread {
             binding.status.text = status
-            binding.chatStatus.text = status
         }
     }
 
@@ -2023,6 +2145,8 @@ class MainActivity : AppCompatActivity() {
         private const val RAW_PCM_SAMPLES_PER_FRAME = 160
         private const val CODEC2_TARGET_RMS = 6500.0
         private const val CODEC2_MAX_GAIN = 3.0
+        private const val CODEC2_BASE_TARGET_RMS = 8500.0
+        private const val CODEC2_BASE_MAX_GAIN = 4.0
         private const val CODEC2_LIMIT = 30000
         private const val RSA_KEY_BITS = 2048
         private const val AES_KEY_BITS = 256
@@ -2041,7 +2165,10 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_CONTACT_PREFIX = "contact_name_"
         private const val KEY_CHAT_LOG_PREFIX = "chat_log_"
         private const val KEY_SEEN_MESSAGE_IDS = "seen_message_ids"
-        private const val NOTIFICATION_CHANNEL_ID = "xxxlink_messages_calls"
+        private const val KEY_FCM_TOKEN = "fcm_token"
+        private const val KEY_UNREAD_NOTIFICATION_COUNT = "unread_notification_count"
+        private const val NOTIFICATION_CALLS_CHANNEL_ID = "xxxlink_calls_v2"
+        private const val NOTIFICATION_MESSAGES_CHANNEL_ID = "xxxlink_messages_v2"
         private const val NOTIFICATION_CALL_ID = 5001
         private const val NOTIFICATION_MESSAGE_ID_BASE = 6000
         private const val METERED_TURN_USERNAME = "adf897ba2cd48862e125b3e7"

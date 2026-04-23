@@ -1,0 +1,17 @@
+{
+  "name": "xxxlinkxxx-functions",
+  "description": "Push notifications for XxxLink",
+  "main": "index.js",
+  "engines": {
+    "node": "22"
+  },
+  "scripts": {
+    "deploy": "firebase deploy --only functions",
+    "lint": "echo \"No lint configured\""
+  },
+  "dependencies": {
+    "firebase-admin": "^13.6.0",
+    "firebase-functions": "^6.6.0"
+  },
+  "private": true
+}
