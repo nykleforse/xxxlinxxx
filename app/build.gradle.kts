@@ -20,7 +20,7 @@ android {
         versionName = "1.0"
 
         ndk {
-            abiFilters += listOf("armeabi-v7a", "arm64-v8a")
+            abiFilters += listOf("arm64-v8a")
         }
 
         // Разрешения для работы с аудио
@@ -37,7 +37,12 @@ android {
             )
         }
         getByName("debug") {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
         }
     }
 
