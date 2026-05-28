@@ -60,9 +60,7 @@ import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
-import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
-import javax.crypto.spec.PBEKeySpec
 import javax.crypto.spec.SecretKeySpec
 import android.text.InputType
 import android.text.Spannable
@@ -141,18 +139,39 @@ class MainActivity : AppCompatActivity() {
         uri?.let { authenticateWithPhoto(it) }
     }
 
-    private var pendingBackupPassword: String? = null
+    private var pendingBackupKey: SecretKey? = null
+    private var pendingRestoreUri: android.net.Uri? = null
 
     private val backupFileLauncher = registerForActivityResult(
         ActivityResultContracts.CreateDocument("application/octet-stream")
     ) { uri ->
-        uri?.let { pw -> pendingBackupPassword?.let { doExportBackup(pw, it); pendingBackupPassword = null } }
+        uri?.let { fileUri -> pendingBackupKey?.let { key -> doExportBackup(fileUri, key); pendingBackupKey = null } }
     }
 
     private val restoreFileLauncher = registerForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri ->
-        uri?.let { showRestorePasswordDialog(it) }
+        uri?.let {
+            pendingRestoreUri = it
+            Toast.makeText(this, "Now select your login photo", Toast.LENGTH_LONG).show()
+            backupRestorePhotoLauncher.launch("image/*")
+        }
+    }
+
+    private val backupRestorePhotoLauncher = registerForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri ->
+        uri?.let { photoUri ->
+            val restoreUri = pendingRestoreUri ?: return@let
+            pendingRestoreUri = null
+            ioScope.launch {
+                val material = runCatching { photoAuthMaterial(photoUri) }.getOrElse {
+                    runOnUiThread { Toast.makeText(this@MainActivity, "Photo read failed", Toast.LENGTH_LONG).show() }
+                    return@launch
+                }
+                doImportBackup(restoreUri, deriveBackupAesKey(material.secret))
+            }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -486,7 +505,7 @@ class MainActivity : AppCompatActivity() {
         }
         binding.btnSend.setOnClickListener { sendMessage() }
         binding.btnAddContact.setOnClickListener { saveCurrentContact(openAfterSave = true) }
-        binding.btnExportBackup.setOnClickListener { showBackupPasswordDialog() }
+        binding.btnExportBackup.setOnClickListener { exportBackupWithPhotoKey() }
         binding.btnImportBackup.setOnClickListener {
             restoreFileLauncher.launch(arrayOf("application/octet-stream", "*/*"))
         }
@@ -1963,49 +1982,23 @@ class MainActivity : AppCompatActivity() {
 
     // ─── Backup / Restore ────────────────────────────────────────────────────
 
-    private fun showBackupPasswordDialog() {
-        val input = EditText(this).apply {
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-            hint = "Backup password (min 4 chars)"
-        }
-        androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle("Backup chats")
-            .setMessage("Chats will be encrypted with this password.")
-            .setView(input)
-            .setPositiveButton("Save file") { _, _ ->
-                val pw = input.text.toString()
-                if (pw.length < 4) {
-                    Toast.makeText(this, "Password too short (min 4)", Toast.LENGTH_SHORT).show()
-                    return@setPositiveButton
-                }
-                pendingBackupPassword = pw
-                val ts = System.currentTimeMillis()
-                backupFileLauncher.launch("xlink_backup_$ts.xlinkbak")
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
+    /**
+     * Derives a backup-specific AES-256 key from the photo account secret.
+     * Uses domain separation so the backup key is distinct from other uses of secret.
+     */
+    private fun deriveBackupAesKey(photoSecret: ByteArray): SecretKey {
+        val info = "xlink-backup-v1:".toByteArray(Charsets.UTF_8)
+        return SecretKeySpec(sha256(info + photoSecret), "AES")
     }
 
-    private fun showRestorePasswordDialog(uri: android.net.Uri) {
-        val input = EditText(this).apply {
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-            hint = "Backup password"
+    private fun exportBackupWithPhotoKey() {
+        val secretB64 = prefs.getString(KEY_PHOTO_ACCOUNT_SECRET, null)
+        if (secretB64 == null) {
+            Toast.makeText(this, "Log in with your photo first", Toast.LENGTH_LONG).show()
+            return
         }
-        androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle("Restore chats")
-            .setMessage("Enter the password used when creating this backup.")
-            .setView(input)
-            .setPositiveButton("Restore") { _, _ ->
-                doImportBackup(uri, input.text.toString())
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    private fun deriveBackupKey(password: String, salt: ByteArray): SecretKey {
-        val spec = PBEKeySpec(password.toCharArray(), salt, BACKUP_PBKDF2_ITERATIONS, 256)
-        val raw = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).encoded
-        return SecretKeySpec(raw, "AES")
+        pendingBackupKey = deriveBackupAesKey(b64decode(secretB64))
+        backupFileLauncher.launch("xlink_backup_${System.currentTimeMillis()}.xlinkbak")
     }
 
     private fun buildBackupJson(): String {
@@ -2052,24 +2045,21 @@ class MainActivity : AppCompatActivity() {
         edit.apply()
     }
 
-    private fun doExportBackup(uri: android.net.Uri, password: String) {
+    private fun doExportBackup(uri: android.net.Uri, key: SecretKey) {
         ioScope.launch {
             try {
                 val plaintext = buildBackupJson().toByteArray(Charsets.UTF_8)
-                val salt = ByteArray(BACKUP_SALT_BYTES).also { SecureRandom().nextBytes(it) }
-                val iv   = ByteArray(BACKUP_IV_BYTES).also  { SecureRandom().nextBytes(it) }
-                val key  = deriveBackupKey(password, salt)
+                val iv = ByteArray(BACKUP_IV_BYTES).also { SecureRandom().nextBytes(it) }
 
                 val cipher = Cipher.getInstance("AES/GCM/NoPadding")
                 cipher.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(128, iv))
                 val ciphertext = cipher.doFinal(plaintext)
 
+                // File format v2: [magic:8][version:1][iv:12][ciphertext]
                 contentResolver.openOutputStream(uri)?.use { out ->
-                    out.write(BACKUP_MAGIC.toByteArray(Charsets.US_ASCII))   // 8 bytes
-                    out.write(BACKUP_VERSION)                                  // 1 byte
-                    out.write(ByteBuffer.allocate(4).putInt(BACKUP_PBKDF2_ITERATIONS).array()) // 4 bytes
-                    out.write(salt)       // 32 bytes
-                    out.write(iv)         // 12 bytes
+                    out.write(BACKUP_MAGIC.toByteArray(Charsets.US_ASCII)) // 8 bytes
+                    out.write(BACKUP_VERSION)                               // 1 byte
+                    out.write(iv)                                           // 12 bytes
                     out.write(ciphertext)
                 }
                 runOnUiThread { Toast.makeText(this@MainActivity, "Backup saved", Toast.LENGTH_SHORT).show() }
@@ -2080,41 +2070,33 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun doImportBackup(uri: android.net.Uri, password: String) {
+    private fun doImportBackup(uri: android.net.Uri, key: SecretKey) {
         ioScope.launch {
             try {
                 val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
                     ?: throw Exception("Cannot open file")
 
-                // Header: 8 (magic) + 1 (version) + 4 (iterations) + 32 (salt) + 12 (iv) = 57 bytes
-                if (bytes.size < 57) throw Exception("File too small")
+                // Header: 8 (magic) + 1 (version) + 12 (iv) = 21 bytes minimum
+                if (bytes.size < 21) throw Exception("File too small")
                 val magic = String(bytes, 0, 8, Charsets.US_ASCII)
                 if (magic != BACKUP_MAGIC) throw Exception("Not an xlink backup file")
                 val version = bytes[8].toInt() and 0xFF
                 if (version != BACKUP_VERSION) throw Exception("Unsupported backup version $version")
 
-                val iterations = ByteBuffer.wrap(bytes, 9, 4).int
-                val salt = bytes.copyOfRange(13, 13 + BACKUP_SALT_BYTES)
-                val iv   = bytes.copyOfRange(13 + BACKUP_SALT_BYTES, 13 + BACKUP_SALT_BYTES + BACKUP_IV_BYTES)
-                val ciphertext = bytes.copyOfRange(13 + BACKUP_SALT_BYTES + BACKUP_IV_BYTES, bytes.size)
-
-                val rawKey = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
-                    .generateSecret(PBEKeySpec(password.toCharArray(), salt, iterations, 256))
-                    .encoded
-                val key = SecretKeySpec(rawKey, "AES")
+                val iv = bytes.copyOfRange(9, 9 + BACKUP_IV_BYTES)
+                val ciphertext = bytes.copyOfRange(9 + BACKUP_IV_BYTES, bytes.size)
 
                 val cipher = Cipher.getInstance("AES/GCM/NoPadding")
                 cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, iv))
-                val plaintext = cipher.doFinal(ciphertext) // AEADBadTagException if wrong password
+                val plaintext = cipher.doFinal(ciphertext) // AEADBadTagException = wrong photo
 
-                val json = plaintext.toString(Charsets.UTF_8)
                 runOnUiThread {
-                    restoreFromJson(json)
+                    restoreFromJson(plaintext.toString(Charsets.UTF_8))
                     renderContacts()
                     Toast.makeText(this@MainActivity, "Chats restored successfully", Toast.LENGTH_SHORT).show()
                 }
             } catch (e: AEADBadTagException) {
-                runOnUiThread { Toast.makeText(this@MainActivity, "Wrong password", Toast.LENGTH_LONG).show() }
+                runOnUiThread { Toast.makeText(this@MainActivity, "Wrong photo — backup not decrypted", Toast.LENGTH_LONG).show() }
             } catch (e: Exception) {
                 Log.e(TAG, "Import backup failed: ${e.message}", e)
                 runOnUiThread { Toast.makeText(this@MainActivity, "Restore failed: ${e.message}", Toast.LENGTH_LONG).show() }
@@ -2768,9 +2750,7 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_CHAT_LOG_PREFIX = "chat_log_"
         private const val KEY_CHAT_READ_PREFIX = "chat_read_count_"
         private const val BACKUP_MAGIC = "XLINKBAK"
-        private const val BACKUP_VERSION = 1
-        private const val BACKUP_PBKDF2_ITERATIONS = 100_000
-        private const val BACKUP_SALT_BYTES = 32
+        private const val BACKUP_VERSION = 2   // v2 = photo-key (no password/PBKDF2)
         private const val BACKUP_IV_BYTES = 12
         private const val KEY_SEEN_MESSAGE_IDS = "seen_message_ids"
         private const val KEY_FCM_TOKEN = "fcm_token"
