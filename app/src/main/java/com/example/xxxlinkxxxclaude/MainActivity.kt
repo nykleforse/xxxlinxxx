@@ -816,6 +816,7 @@ class MainActivity : AppCompatActivity() {
         remoteId = id
         binding.chatTitle.text = contactName(id)
         binding.messages.text = messageLogFor(id).toString()
+        binding.messagesScroll.post { binding.messagesScroll.fullScroll(View.FOCUS_DOWN) }
         binding.contactListScreen.visibility = View.GONE
         binding.addContactScreen.visibility = View.GONE
         binding.chatScreen.visibility = View.VISIBLE
@@ -1775,6 +1776,7 @@ class MainActivity : AppCompatActivity() {
             prefs.edit().putString(chatLogKey(chatId), log.toString()).apply()
             if (binding.chatScreen.visibility == View.VISIBLE && chatId == remoteId) {
                 binding.messages.text = log.toString()
+                binding.messagesScroll.post { binding.messagesScroll.fullScroll(View.FOCUS_DOWN) }
             }
         }
         if (Thread.currentThread() == mainLooper.thread) {
