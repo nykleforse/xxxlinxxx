@@ -60,6 +60,9 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
+import android.text.Spannable
+import android.text.SpannableStringBuilder
+import android.text.style.ForegroundColorSpan
 import kotlin.math.absoluteValue
 
 class MainActivity : AppCompatActivity() {
@@ -105,9 +108,14 @@ class MainActivity : AppCompatActivity() {
     private val voiceJitterBuffer = TreeMap<Int, ByteArray>()
     private var txVoiceSeq = 0
     private var rxVoiceSeq: Int? = null
+    private enum class MsgStatus { SENT, DELIVERED, READ }
+
     private val messageLogs = mutableMapOf<String, StringBuilder>()
     private val pendingMessages = mutableMapOf<String, String>()
     private var chatDividerLineIndex = -1   // index where "new messages" start; -1 = no divider
+    private val messageStatuses = mutableMapOf<String, MsgStatus>()                     // msgId -> status (my outgoing msgs)
+    private val myMessageLines  = mutableMapOf<String, MutableList<Pair<Int, String>>>() // chatId -> [(absLineIdx, msgId)]
+    private val incomingMsgIds  = mutableMapOf<String, MutableList<String>>()            // chatId -> [msgId from peer, awaiting READ]
     private val receivedMessageIds = mutableSetOf<String>()
     private val messageSeqCounter = AtomicInteger(0)
     private var coreStarted = false
@@ -827,8 +835,8 @@ class MainActivity : AppCompatActivity() {
 
         if (newCount > 0 && savedCount > 0) {
             chatDividerLineIndex = savedCount
-            binding.messages.text = lines.take(savedCount).joinToString("\n", postfix = "\n")
-            binding.newMessagesText.text = lines.takeLast(newCount).joinToString("\n", postfix = "\n")
+            binding.messages.text = buildChatSpannable(id, lines.take(savedCount), 0)
+            binding.newMessagesText.text = buildChatSpannable(id, lines.takeLast(newCount), savedCount)
             binding.newMessagesDivider.visibility = View.VISIBLE
             binding.newMessagesText.visibility = View.VISIBLE
             binding.messagesScroll.post {
@@ -836,11 +844,15 @@ class MainActivity : AppCompatActivity() {
             }
         } else {
             chatDividerLineIndex = -1
-            binding.messages.text = allText
+            binding.messages.text = buildChatSpannable(id, lines, 0)
             binding.newMessagesDivider.visibility = View.GONE
             binding.newMessagesText.visibility = View.GONE
             binding.messagesScroll.post { binding.messagesScroll.fullScroll(View.FOCUS_DOWN) }
         }
+
+        // Send READ receipts for any DataChannel messages received before chat was opened
+        incomingMsgIds[id]?.toList()?.forEach { msgId -> sendRead(msgId) }
+        incomingMsgIds.remove(id)
 
         binding.contactListScreen.visibility = View.GONE
         binding.addContactScreen.visibility = View.GONE
@@ -1523,9 +1535,12 @@ class MainActivity : AppCompatActivity() {
                     "createdAt" to System.currentTimeMillis()
                 )
 
+                val cloudLineIndex = messageLogFor(targetId).toString().split('\n').count { it.isNotEmpty() }
                 firestore.collection("messages").document(id).set(message)
                     .addOnSuccessListener {
                         markMessageSeen(id)
+                        messageStatuses[id] = MsgStatus.SENT
+                        myMessageLines.getOrPut(targetId) { mutableListOf() }.add(cloudLineIndex to id)
                         binding.messageInput.text?.clear()
                         appendMessage(targetId, "Me", text)
                         runOnUiThread {
@@ -1713,9 +1728,12 @@ class MainActivity : AppCompatActivity() {
         }
 
         val id = nextMessageId()
-        synchronized(pendingMessages) {
-            pendingMessages[id] = text
-        }
+        // Track line index BEFORE appending so we can match checkmark to this line
+        val lineIndex = messageLogFor(remoteId).toString().split('\n').count { it.isNotEmpty() }
+        messageStatuses[id] = MsgStatus.SENT
+        myMessageLines.getOrPut(remoteId) { mutableListOf() }.add(lineIndex to id)
+
+        synchronized(pendingMessages) { pendingMessages[id] = text }
         sendTextPacket(id, text)
         retryUntilAck(id)
         binding.messageInput.text?.clear()
@@ -1727,24 +1745,35 @@ class MainActivity : AppCompatActivity() {
         when (parts.firstOrNull()) {
             "ACK" -> {
                 val id = parts.getOrNull(1) ?: return
-                synchronized(pendingMessages) {
-                    pendingMessages.remove(id)
-                }
+                synchronized(pendingMessages) { pendingMessages.remove(id) }
+                messageStatuses[id] = MsgStatus.DELIVERED
+                runOnUiThread { refreshChatDisplay(remoteId) }
+            }
+            "READ" -> {
+                val id = parts.getOrNull(1) ?: return
+                messageStatuses[id] = MsgStatus.READ
+                runOnUiThread { refreshChatDisplay(remoteId) }
             }
             "TXT" -> {
                 val id = parts.getOrNull(1) ?: return
                 val payload = parts.getOrNull(2) ?: return
                 sendAck(id)
 
-                val isNew = synchronized(receivedMessageIds) {
-                    receivedMessageIds.add(id)
-                }
+                val isNew = synchronized(receivedMessageIds) { receivedMessageIds.add(id) }
                 if (!isNew) return
 
                 val text = String(Base64.decode(payload, Base64.NO_WRAP), Charsets.UTF_8)
                 val chatId = remoteId.takeIf { it.isNotBlank() } ?: "unknown"
+                incomingMsgIds.getOrPut(chatId) { mutableListOf() }.add(id)
                 appendMessage(chatId, contactName(chatId), text)
-                runOnUiThread { notifyIncomingMessage(chatId, text) }
+                runOnUiThread {
+                    notifyIncomingMessage(chatId, text)
+                    // If user is looking at this chat, send READ immediately
+                    if (binding.chatScreen.visibility == View.VISIBLE && chatId == remoteId) {
+                        sendRead(id)
+                        incomingMsgIds[chatId]?.remove(id)
+                    }
+                }
             }
         }
     }
@@ -1756,6 +1785,56 @@ class MainActivity : AppCompatActivity() {
 
     private fun sendAck(id: String) {
         sendMessagePacket("ACK|$id|")
+    }
+
+    private fun sendRead(id: String) {
+        sendMessagePacket("READ|$id|")
+    }
+
+    /**
+     * Build a SpannableStringBuilder for [lines] (already filtered, non-empty).
+     * [fromLine] = absolute line index of lines[0] in the full chat log.
+     * My outgoing messages get a colored checkmark appended based on MsgStatus.
+     */
+    private fun buildChatSpannable(
+        chatId: String,
+        lines: List<String>,
+        fromLine: Int = 0
+    ): SpannableStringBuilder {
+        val gray = 0xFF888888.toInt()
+        val blue = 0xFF2196F3.toInt()
+        val lineToMsgId = myMessageLines[chatId]
+            ?.associate { (idx, id) -> idx to id }
+            ?: emptyMap()
+        val sb = SpannableStringBuilder()
+        lines.forEachIndexed { localIdx, line ->
+            sb.append(line)
+            val msgId = lineToMsgId[fromLine + localIdx]
+            if (msgId != null) {
+                val (mark, color) = when (messageStatuses[msgId] ?: MsgStatus.SENT) {
+                    MsgStatus.SENT      -> " ✓"  to gray
+                    MsgStatus.DELIVERED -> " ✓✓" to gray
+                    MsgStatus.READ      -> " ✓"  to blue
+                }
+                val start = sb.length
+                sb.append(mark)
+                sb.setSpan(ForegroundColorSpan(color), start, sb.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
+            sb.append('\n')
+        }
+        return sb
+    }
+
+    /** Rebuild chat TextViews from scratch — called when statuses change. */
+    private fun refreshChatDisplay(chatId: String) {
+        if (binding.chatScreen.visibility != View.VISIBLE || chatId != remoteId) return
+        val lines = messageLogFor(chatId).toString().split('\n').filter { it.isNotEmpty() }
+        if (chatDividerLineIndex >= 0) {
+            binding.messages.text = buildChatSpannable(chatId, lines.take(chatDividerLineIndex), 0)
+            binding.newMessagesText.text = buildChatSpannable(chatId, lines.drop(chatDividerLineIndex), chatDividerLineIndex)
+        } else {
+            binding.messages.text = buildChatSpannable(chatId, lines, 0)
+        }
     }
 
     private fun sendMessagePacket(packet: String): Boolean {
@@ -1806,11 +1885,10 @@ class MainActivity : AppCompatActivity() {
 
                 if (chatDividerLineIndex >= 0) {
                     // Divider visible — update only the new-messages section (below divider)
-                    val newLines = lines.drop(chatDividerLineIndex)
-                    binding.newMessagesText.text = newLines.joinToString("\n", postfix = "\n")
+                    binding.newMessagesText.text = buildChatSpannable(chatId, lines.drop(chatDividerLineIndex), chatDividerLineIndex)
                     binding.newMessagesText.visibility = View.VISIBLE
                 } else {
-                    binding.messages.text = log.toString()
+                    binding.messages.text = buildChatSpannable(chatId, lines, 0)
                 }
                 binding.messagesScroll.post { binding.messagesScroll.fullScroll(View.FOCUS_DOWN) }
             }
