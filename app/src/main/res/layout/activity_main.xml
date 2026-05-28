@@ -256,42 +256,6 @@
                 android:src="@drawable/ic_phone_24" />
         </LinearLayout>
 
-        <RadioGroup
-            android:id="@+id/modeGroup"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="10dp"
-            android:orientation="horizontal">
-
-            <RadioButton
-                android:id="@+id/modeComfy"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:buttonTint="@color/text_secondary"
-                android:text="comfy"
-                android:textColor="@color/text_secondary" />
-
-            <RadioButton
-                android:id="@+id/modeBase"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:buttonTint="@color/text_secondary"
-                android:checked="true"
-                android:text="base"
-                android:textColor="@color/text_secondary" />
-
-            <RadioButton
-                android:id="@+id/modeXtream"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:buttonTint="@color/text_secondary"
-                android:text="Xtream"
-                android:textColor="@color/text_secondary" />
-        </RadioGroup>
-
         <LinearLayout
             android:id="@+id/callControls"
             android:layout_width="match_parent"

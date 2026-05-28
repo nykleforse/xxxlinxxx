@@ -119,8 +119,8 @@ class MainActivity : AppCompatActivity() {
     private val receivedMessageIds = mutableSetOf<String>()
     private val messageSeqCounter = AtomicInteger(0)
     private var coreStarted = false
-    private var currentVoiceMode = VoiceMode.BASE
-    private var applyingRemoteMode = false
+    private var currentVoiceMode = VoiceMode.COMFY
+
     @Volatile private var answerProcessed = false
     @Volatile private var offerProcessed = false
     private val processedCandidateIds = mutableSetOf<String>()
@@ -464,14 +464,6 @@ class MainActivity : AppCompatActivity() {
         }
         binding.btnSend.setOnClickListener { sendMessage() }
         binding.btnAddContact.setOnClickListener { saveCurrentContact(openAfterSave = true) }
-        binding.modeGroup.setOnCheckedChangeListener { _, checkedId ->
-            val selectedMode = when (checkedId) {
-                binding.modeComfy.id -> VoiceMode.COMFY
-                binding.modeXtream.id -> VoiceMode.XTREAM
-                else -> VoiceMode.BASE
-            }
-            setVoiceMode(selectedMode)
-        }
         renderContacts()
         showContactList()
         showCallControls(false)
@@ -1033,21 +1025,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun setVoiceMode(mode: VoiceMode) {
-        if (applyingRemoteMode) return
-        if (mode == currentVoiceMode) return
-        if (recording) {
-            binding.status.text = "Disconnect before changing mode"
-            binding.modeGroup.check(currentVoiceMode.buttonId(binding))
-            return
-        }
-
-        releaseSharedCodec()
-        currentVoiceMode = mode
-        mode.codec2Mode?.let { codec2 = Codec2Bridge(it) }
-        updateModeStatus()
-    }
-
     private fun applyVoiceModeFromRemote(mode: VoiceMode) {
         if (mode == currentVoiceMode) return
         if (recording) return
@@ -1056,13 +1033,10 @@ class MainActivity : AppCompatActivity() {
         currentVoiceMode = mode
         mode.codec2Mode?.let { codec2 = Codec2Bridge(it) }
 
-        updateModeSelectionFromRemote(mode)
+        binding.status.text = "Incoming mode: ${mode.label}"
     }
 
     private fun updateModeSelectionFromRemote(mode: VoiceMode) {
-        applyingRemoteMode = true
-        binding.modeGroup.check(mode.buttonId(binding))
-        applyingRemoteMode = false
         binding.status.text = "Incoming mode: ${mode.label}"
     }
 
@@ -2578,16 +2552,9 @@ class MainActivity : AppCompatActivity() {
         BASE("base", 0),
         XTREAM("Xtream", 1);
 
-        fun buttonId(binding: ActivityMainBinding): Int =
-            when (this) {
-                COMFY -> binding.modeComfy.id
-                BASE -> binding.modeBase.id
-                XTREAM -> binding.modeXtream.id
-            }
-
         companion object {
             fun fromLabel(label: String?): VoiceMode =
-                entries.firstOrNull { it.label == label } ?: BASE
+                entries.firstOrNull { it.label == label } ?: COMFY
         }
 
         fun frameSamples(codec: Codec2Bridge?): Int =
