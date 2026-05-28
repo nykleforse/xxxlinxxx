@@ -116,6 +116,7 @@ class MainActivity : AppCompatActivity() {
     private val messageStatuses = mutableMapOf<String, MsgStatus>()                     // msgId -> status (my outgoing msgs)
     private val myMessageLines  = mutableMapOf<String, MutableList<Pair<Int, String>>>() // chatId -> [(absLineIdx, msgId)]
     private val incomingMsgIds  = mutableMapOf<String, MutableList<String>>()            // chatId -> [msgId from peer, awaiting READ]
+    private val pendingCloudReadReceipts = mutableMapOf<String, MutableSet<String>>()   // contactId -> msgIds received via cloud, not yet marked read
     private val receivedMessageIds = mutableSetOf<String>()
     private val messageSeqCounter = AtomicInteger(0)
     private var coreStarted = false
@@ -842,9 +843,11 @@ class MainActivity : AppCompatActivity() {
             binding.messagesScroll.post { binding.messagesScroll.fullScroll(View.FOCUS_DOWN) }
         }
 
-        // Send READ receipts for any DataChannel messages received before chat was opened
+        // Send READ receipts for DataChannel messages received before chat was opened
         incomingMsgIds[id]?.toList()?.forEach { msgId -> sendRead(msgId) }
         incomingMsgIds.remove(id)
+        // Send READ receipts for cloud (Firestore) messages
+        sendCloudReadReceipts(id)
 
         binding.contactListScreen.visibility = View.GONE
         binding.addContactScreen.visibility = View.GONE
@@ -1545,6 +1548,7 @@ class MainActivity : AppCompatActivity() {
             while (isActive) {
                 delay(MESSAGE_POLL_MS)
                 pollCloudMessages()
+                pollReceipts()
             }
         }
     }
@@ -1578,6 +1582,14 @@ class MainActivity : AppCompatActivity() {
         }
 
         markMessageSeen(id)
+
+        // Write delivery receipt to Firestore so sender gets ✓✓
+        db?.collection("receipts")?.document(id)?.set(
+            mapOf("from" to localId, "to" to senderId,
+                  "delivered" to true, "read" to false,
+                  "createdAt" to System.currentTimeMillis())
+        )
+
         runOnUiThread {
             rememberContact(senderId)
             appendMessage(senderId, contactName(senderId), text)
@@ -1585,8 +1597,58 @@ class MainActivity : AppCompatActivity() {
             binding.status.text = "Message from ${contactName(senderId)}"
             if (remoteId == senderId && binding.chatScreen.visibility == View.VISIBLE) {
                 binding.chatStatus.text = "Message from ${contactName(senderId)}"
+                // Chat is open — mark read immediately
+                sendCloudReadReceipt(id, senderId)
+            } else {
+                // Chat closed — queue for when user opens it
+                pendingCloudReadReceipts.getOrPut(senderId) { mutableSetOf() }.add(id)
             }
             deleteCloudMessage(document)
+        }
+    }
+
+    /** Mark a single cloud message as read in Firestore. */
+    private fun sendCloudReadReceipt(msgId: String, contactId: String) {
+        db?.collection("receipts")?.document(msgId)
+            ?.update("read", true)
+            ?.addOnFailureListener { e -> Log.w(TAG, "read receipt update failed: ${e.message}") }
+    }
+
+    /** Send read receipts for all queued cloud messages from [contactId]. */
+    private fun sendCloudReadReceipts(contactId: String) {
+        val pending = pendingCloudReadReceipts.remove(contactId) ?: return
+        pending.forEach { msgId -> sendCloudReadReceipt(msgId, contactId) }
+    }
+
+    private fun pollReceipts() {
+        val firestore = db ?: return
+        firestore.collection("receipts")
+            .whereEqualTo("to", localId)
+            .limit(50)
+            .get()
+            .addOnSuccessListener { snap -> snap.documents.forEach { processReceiptDoc(it) } }
+            .addOnFailureListener { e -> Log.w(TAG, "pollReceipts failed: ${e.message}") }
+    }
+
+    private fun processReceiptDoc(doc: DocumentSnapshot) {
+        val msgId = doc.id
+        val fromId = doc.getString("from") ?: return
+        val isRead = doc.getBoolean("read") ?: false
+        val isDelivered = doc.getBoolean("delivered") ?: false
+
+        val newStatus = when {
+            isRead -> MsgStatus.READ
+            isDelivered -> MsgStatus.DELIVERED
+            else -> return
+        }
+        // Only upgrade status, never downgrade
+        if (messageStatuses[msgId] != MsgStatus.READ) {
+            messageStatuses[msgId] = newStatus
+            runOnUiThread { refreshChatDisplay(fromId) }
+        }
+        // Delete receipt once READ is confirmed (no more updates needed)
+        if (isRead) {
+            doc.reference.delete()
         }
     }
 
