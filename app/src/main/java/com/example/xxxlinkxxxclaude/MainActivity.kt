@@ -107,6 +107,7 @@ class MainActivity : AppCompatActivity() {
     private var rxVoiceSeq: Int? = null
     private val messageLogs = mutableMapOf<String, StringBuilder>()
     private val pendingMessages = mutableMapOf<String, String>()
+    private var chatDividerLineIndex = -1   // index where "new messages" start; -1 = no divider
     private val receivedMessageIds = mutableSetOf<String>()
     private val messageSeqCounter = AtomicInteger(0)
     private var coreStarted = false
@@ -815,8 +816,32 @@ class MainActivity : AppCompatActivity() {
     private fun openChat(id: String) {
         remoteId = id
         binding.chatTitle.text = contactName(id)
-        binding.messages.text = messageLogFor(id).toString()
-        binding.messagesScroll.post { binding.messagesScroll.fullScroll(View.FOCUS_DOWN) }
+
+        val allText = messageLogFor(id).toString()
+        val lines = allText.split('\n').filter { it.isNotEmpty() }
+        val savedCount = prefs.getInt("$KEY_CHAT_READ_PREFIX$id", 0)
+        val newCount = (lines.size - savedCount).coerceAtLeast(0)
+
+        // Mark all current messages as read
+        prefs.edit().putInt("$KEY_CHAT_READ_PREFIX$id", lines.size).apply()
+
+        if (newCount > 0 && savedCount > 0) {
+            chatDividerLineIndex = savedCount
+            binding.messages.text = lines.take(savedCount).joinToString("\n", postfix = "\n")
+            binding.newMessagesText.text = lines.takeLast(newCount).joinToString("\n", postfix = "\n")
+            binding.newMessagesDivider.visibility = View.VISIBLE
+            binding.newMessagesText.visibility = View.VISIBLE
+            binding.messagesScroll.post {
+                binding.messagesScroll.smoothScrollTo(0, binding.newMessagesDivider.top)
+            }
+        } else {
+            chatDividerLineIndex = -1
+            binding.messages.text = allText
+            binding.newMessagesDivider.visibility = View.GONE
+            binding.newMessagesText.visibility = View.GONE
+            binding.messagesScroll.post { binding.messagesScroll.fullScroll(View.FOCUS_DOWN) }
+        }
+
         binding.contactListScreen.visibility = View.GONE
         binding.addContactScreen.visibility = View.GONE
         binding.chatScreen.visibility = View.VISIBLE
@@ -1775,7 +1800,18 @@ class MainActivity : AppCompatActivity() {
             log.append(author).append(": ").append(text).append('\n')
             prefs.edit().putString(chatLogKey(chatId), log.toString()).apply()
             if (binding.chatScreen.visibility == View.VISIBLE && chatId == remoteId) {
-                binding.messages.text = log.toString()
+                // Mark as read — user is actively in the chat
+                val lines = log.toString().split('\n').filter { it.isNotEmpty() }
+                prefs.edit().putInt("$KEY_CHAT_READ_PREFIX$chatId", lines.size).apply()
+
+                if (chatDividerLineIndex >= 0) {
+                    // Divider visible — update only the new-messages section (below divider)
+                    val newLines = lines.drop(chatDividerLineIndex)
+                    binding.newMessagesText.text = newLines.joinToString("\n", postfix = "\n")
+                    binding.newMessagesText.visibility = View.VISIBLE
+                } else {
+                    binding.messages.text = log.toString()
+                }
                 binding.messagesScroll.post { binding.messagesScroll.fullScroll(View.FOCUS_DOWN) }
             }
         }
@@ -2428,6 +2464,7 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_CONTACT_IDS = "contact_ids"
         private const val KEY_CONTACT_PREFIX = "contact_name_"
         private const val KEY_CHAT_LOG_PREFIX = "chat_log_"
+        private const val KEY_CHAT_READ_PREFIX = "chat_read_count_"
         private const val KEY_SEEN_MESSAGE_IDS = "seen_message_ids"
         private const val KEY_FCM_TOKEN = "fcm_token"
         private const val KEY_UNREAD_NOTIFICATION_COUNT = "unread_notification_count"

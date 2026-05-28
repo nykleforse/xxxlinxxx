@@ -339,14 +339,39 @@
             android:fillViewport="true"
             android:scrollbars="vertical">
 
-            <TextView
-                android:id="@+id/messages"
+            <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:gravity="bottom"
-                android:text=""
-                android:textColor="@color/text_primary"
-                android:textSize="15sp" />
+                android:orientation="vertical">
+
+                <TextView
+                    android:id="@+id/messages"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text=""
+                    android:textColor="@color/text_primary"
+                    android:textSize="15sp" />
+
+                <View
+                    android:id="@+id/newMessagesDivider"
+                    android:layout_width="match_parent"
+                    android:layout_height="1dp"
+                    android:layout_marginTop="6dp"
+                    android:layout_marginBottom="6dp"
+                    android:alpha="0.45"
+                    android:background="#808080"
+                    android:visibility="gone" />
+
+                <TextView
+                    android:id="@+id/newMessagesText"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text=""
+                    android:textColor="@color/text_primary"
+                    android:textSize="15sp"
+                    android:visibility="gone" />
+
+            </LinearLayout>
         </ScrollView>
 
         <LinearLayout
