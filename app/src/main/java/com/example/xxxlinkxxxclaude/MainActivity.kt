@@ -38,6 +38,7 @@ import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.SetOptions
 import com.google.firebase.messaging.FirebaseMessaging
 import kotlinx.coroutines.*
+import org.json.JSONArray
 import org.json.JSONObject
 import org.webrtc.*
 import java.nio.ByteBuffer
@@ -55,14 +56,20 @@ import java.util.Locale
 import java.util.TreeMap
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
+import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
+import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.PBEKeySpec
 import javax.crypto.spec.SecretKeySpec
+import android.text.InputType
 import android.text.Spannable
 import android.text.SpannableStringBuilder
 import android.text.style.ForegroundColorSpan
+import android.widget.EditText
+import android.widget.Toast
 import kotlin.math.absoluteValue
 
 class MainActivity : AppCompatActivity() {
@@ -132,6 +139,20 @@ class MainActivity : AppCompatActivity() {
     private val dismissedIncomingSessions = mutableSetOf<String>()
     private val photoAuthPicker = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let { authenticateWithPhoto(it) }
+    }
+
+    private var pendingBackupPassword: String? = null
+
+    private val backupFileLauncher = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream")
+    ) { uri ->
+        uri?.let { pw -> pendingBackupPassword?.let { doExportBackup(pw, it); pendingBackupPassword = null } }
+    }
+
+    private val restoreFileLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let { showRestorePasswordDialog(it) }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -465,6 +486,10 @@ class MainActivity : AppCompatActivity() {
         }
         binding.btnSend.setOnClickListener { sendMessage() }
         binding.btnAddContact.setOnClickListener { saveCurrentContact(openAfterSave = true) }
+        binding.btnExportBackup.setOnClickListener { showBackupPasswordDialog() }
+        binding.btnImportBackup.setOnClickListener {
+            restoreFileLauncher.launch(arrayOf("application/octet-stream", "*/*"))
+        }
         renderContacts()
         showContactList()
         showCallControls(false)
@@ -1936,6 +1961,169 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ─── Backup / Restore ────────────────────────────────────────────────────
+
+    private fun showBackupPasswordDialog() {
+        val input = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            hint = "Backup password (min 4 chars)"
+        }
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Backup chats")
+            .setMessage("Chats will be encrypted with this password.")
+            .setView(input)
+            .setPositiveButton("Save file") { _, _ ->
+                val pw = input.text.toString()
+                if (pw.length < 4) {
+                    Toast.makeText(this, "Password too short (min 4)", Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+                pendingBackupPassword = pw
+                val ts = System.currentTimeMillis()
+                backupFileLauncher.launch("xlink_backup_$ts.xlinkbak")
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun showRestorePasswordDialog(uri: android.net.Uri) {
+        val input = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            hint = "Backup password"
+        }
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Restore chats")
+            .setMessage("Enter the password used when creating this backup.")
+            .setView(input)
+            .setPositiveButton("Restore") { _, _ ->
+                doImportBackup(uri, input.text.toString())
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun deriveBackupKey(password: String, salt: ByteArray): SecretKey {
+        val spec = PBEKeySpec(password.toCharArray(), salt, BACKUP_PBKDF2_ITERATIONS, 256)
+        val raw = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).encoded
+        return SecretKeySpec(raw, "AES")
+    }
+
+    private fun buildBackupJson(): String {
+        val contacts = savedContactIds()
+        val jsonContacts = JSONArray()
+        val jsonChats = JSONArray()
+        contacts.forEach { id ->
+            jsonContacts.put(JSONObject().put("id", id).put("name", contactName(id)))
+            val log = prefs.getString("$KEY_CHAT_LOG_PREFIX$id", "")
+            if (!log.isNullOrEmpty()) {
+                jsonChats.put(JSONObject().put("id", id).put("log", log))
+            }
+        }
+        return JSONObject()
+            .put("v", BACKUP_VERSION)
+            .put("ts", System.currentTimeMillis())
+            .put("localId", localId)
+            .put("contacts", jsonContacts)
+            .put("chats", jsonChats)
+            .toString()
+    }
+
+    private fun restoreFromJson(json: String) {
+        val root = JSONObject(json)
+        val contacts = root.getJSONArray("contacts")
+        val newIds = mutableSetOf<String>()
+        val edit = prefs.edit()
+        for (i in 0 until contacts.length()) {
+            val c = contacts.getJSONObject(i)
+            val id = c.getString("id")
+            newIds.add(id)
+            edit.putString("$KEY_CONTACT_PREFIX$id", c.getString("name"))
+        }
+        edit.putStringSet(KEY_CONTACT_IDS, savedContactIds() + newIds)
+
+        val chats = root.getJSONArray("chats")
+        for (i in 0 until chats.length()) {
+            val c = chats.getJSONObject(i)
+            val id = c.getString("id")
+            val log = c.getString("log")
+            edit.putString("$KEY_CHAT_LOG_PREFIX$id", log)
+            messageLogs[id] = StringBuilder(log)
+        }
+        edit.apply()
+    }
+
+    private fun doExportBackup(uri: android.net.Uri, password: String) {
+        ioScope.launch {
+            try {
+                val plaintext = buildBackupJson().toByteArray(Charsets.UTF_8)
+                val salt = ByteArray(BACKUP_SALT_BYTES).also { SecureRandom().nextBytes(it) }
+                val iv   = ByteArray(BACKUP_IV_BYTES).also  { SecureRandom().nextBytes(it) }
+                val key  = deriveBackupKey(password, salt)
+
+                val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+                cipher.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(128, iv))
+                val ciphertext = cipher.doFinal(plaintext)
+
+                contentResolver.openOutputStream(uri)?.use { out ->
+                    out.write(BACKUP_MAGIC.toByteArray(Charsets.US_ASCII))   // 8 bytes
+                    out.write(BACKUP_VERSION)                                  // 1 byte
+                    out.write(ByteBuffer.allocate(4).putInt(BACKUP_PBKDF2_ITERATIONS).array()) // 4 bytes
+                    out.write(salt)       // 32 bytes
+                    out.write(iv)         // 12 bytes
+                    out.write(ciphertext)
+                }
+                runOnUiThread { Toast.makeText(this@MainActivity, "Backup saved", Toast.LENGTH_SHORT).show() }
+            } catch (e: Exception) {
+                Log.e(TAG, "Export backup failed: ${e.message}", e)
+                runOnUiThread { Toast.makeText(this@MainActivity, "Backup failed: ${e.message}", Toast.LENGTH_LONG).show() }
+            }
+        }
+    }
+
+    private fun doImportBackup(uri: android.net.Uri, password: String) {
+        ioScope.launch {
+            try {
+                val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                    ?: throw Exception("Cannot open file")
+
+                // Header: 8 (magic) + 1 (version) + 4 (iterations) + 32 (salt) + 12 (iv) = 57 bytes
+                if (bytes.size < 57) throw Exception("File too small")
+                val magic = String(bytes, 0, 8, Charsets.US_ASCII)
+                if (magic != BACKUP_MAGIC) throw Exception("Not an xlink backup file")
+                val version = bytes[8].toInt() and 0xFF
+                if (version != BACKUP_VERSION) throw Exception("Unsupported backup version $version")
+
+                val iterations = ByteBuffer.wrap(bytes, 9, 4).int
+                val salt = bytes.copyOfRange(13, 13 + BACKUP_SALT_BYTES)
+                val iv   = bytes.copyOfRange(13 + BACKUP_SALT_BYTES, 13 + BACKUP_SALT_BYTES + BACKUP_IV_BYTES)
+                val ciphertext = bytes.copyOfRange(13 + BACKUP_SALT_BYTES + BACKUP_IV_BYTES, bytes.size)
+
+                val rawKey = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+                    .generateSecret(PBEKeySpec(password.toCharArray(), salt, iterations, 256))
+                    .encoded
+                val key = SecretKeySpec(rawKey, "AES")
+
+                val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+                cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, iv))
+                val plaintext = cipher.doFinal(ciphertext) // AEADBadTagException if wrong password
+
+                val json = plaintext.toString(Charsets.UTF_8)
+                runOnUiThread {
+                    restoreFromJson(json)
+                    renderContacts()
+                    Toast.makeText(this@MainActivity, "Chats restored successfully", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: AEADBadTagException) {
+                runOnUiThread { Toast.makeText(this@MainActivity, "Wrong password", Toast.LENGTH_LONG).show() }
+            } catch (e: Exception) {
+                Log.e(TAG, "Import backup failed: ${e.message}", e)
+                runOnUiThread { Toast.makeText(this@MainActivity, "Restore failed: ${e.message}", Toast.LENGTH_LONG).show() }
+            }
+        }
+    }
+
+    // ─── End Backup / Restore ────────────────────────────────────────────────
+
     private fun startCallSetupTimeout(callId: String, sessionId: String) {
         cancelCallTimeout()
         callTimeoutJob = ioScope.launch {
@@ -2579,6 +2767,11 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_CONTACT_PREFIX = "contact_name_"
         private const val KEY_CHAT_LOG_PREFIX = "chat_log_"
         private const val KEY_CHAT_READ_PREFIX = "chat_read_count_"
+        private const val BACKUP_MAGIC = "XLINKBAK"
+        private const val BACKUP_VERSION = 1
+        private const val BACKUP_PBKDF2_ITERATIONS = 100_000
+        private const val BACKUP_SALT_BYTES = 32
+        private const val BACKUP_IV_BYTES = 12
         private const val KEY_SEEN_MESSAGE_IDS = "seen_message_ids"
         private const val KEY_FCM_TOKEN = "fcm_token"
         private const val KEY_UNREAD_NOTIFICATION_COUNT = "unread_notification_count"
