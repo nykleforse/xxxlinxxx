@@ -1,6 +1,13 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+}
+
+val localProps = Properties().also { props ->
+    val f = rootProject.file("local.properties")
+    if (f.exists()) props.load(f.inputStream())
 }
 
 if (file("google-services.json").exists()) {
@@ -20,12 +27,14 @@ android {
         versionName = "1.0"
 
         ndk {
-            abiFilters += listOf("arm64-v8a")
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
         }
 
         // Разрешения для работы с аудио
         manifestPlaceholders["usesCleartextTraffic"] = true
 
+        buildConfigField("String", "TURN_USERNAME", "\"${localProps.getProperty("turn.username", "")}\"")
+        buildConfigField("String", "TURN_PASSWORD", "\"${localProps.getProperty("turn.password", "")}\"")
     }
 
     buildTypes {
@@ -52,6 +61,7 @@ android {
 
     buildFeatures {
         viewBinding = true
+        buildConfig = true
     }
 
     // Подключение CMake для сборки codec2_bridge и codec2

@@ -11,6 +11,10 @@ extern "C" {
 JNIEXPORT jlong JNICALL
 Java_com_example_p2pcodec2_Codec2Bridge_nativeCreate(JNIEnv *, jobject, jint mode) {
     struct CODEC2 *c2 = codec2_create(mode);
+    if (c2 == nullptr) {
+        LOGE("codec2_create failed for mode %d", mode);
+        return 0L;
+    }
     return reinterpret_cast<jlong>(c2);
 }
 

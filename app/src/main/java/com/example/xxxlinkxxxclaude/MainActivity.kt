@@ -27,6 +27,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.appcompat.app.AppCompatActivity
+import com.example.xxxlinkxxx.BuildConfig
 import com.example.xxxlinkxxx.R
 import com.example.xxxlinkxxx.databinding.ActivityMainBinding
 import com.google.firebase.FirebaseApp
@@ -37,6 +38,7 @@ import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.SetOptions
 import com.google.firebase.messaging.FirebaseMessaging
 import kotlinx.coroutines.*
+import org.json.JSONObject
 import org.webrtc.*
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -52,6 +54,7 @@ import java.security.spec.X509EncodedKeySpec
 import java.util.Locale
 import java.util.TreeMap
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicInteger
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -76,6 +79,7 @@ class MainActivity : AppCompatActivity() {
     private var callTimeoutJob: Job? = null
     private var appInForeground = false
     private var unreadNotificationCount = 0
+    private var pendingMicAction: PendingMicAction? = null
 
     private var localId = ""
     private var remoteId = ""
@@ -104,12 +108,12 @@ class MainActivity : AppCompatActivity() {
     private val messageLogs = mutableMapOf<String, StringBuilder>()
     private val pendingMessages = mutableMapOf<String, String>()
     private val receivedMessageIds = mutableSetOf<String>()
-    private var messageSeq = 0
+    private val messageSeqCounter = AtomicInteger(0)
     private var coreStarted = false
     private var currentVoiceMode = VoiceMode.BASE
     private var applyingRemoteMode = false
-    private var answerProcessed = false
-    private var offerProcessed = false
+    @Volatile private var answerProcessed = false
+    @Volatile private var offerProcessed = false
     private val processedCandidateIds = mutableSetOf<String>()
     private var voiceSent = 0
     private var voiceReceived = 0
@@ -150,15 +154,7 @@ class MainActivity : AppCompatActivity() {
         binding.myId.text = "Your ID: $localId"
         binding.photoAuthScreen.visibility = View.GONE
         binding.contactListScreen.visibility = View.VISIBLE
-        if (hasRecordAudioPermission()) {
-            startCore()
-        } else {
-            ActivityCompat.requestPermissions(
-                this,
-                arrayOf(Manifest.permission.RECORD_AUDIO),
-                REQ_RECORD_AUDIO
-            )
-        }
+        startCore()
     }
 
     private fun showPhotoAuthScreen() {
@@ -230,18 +226,33 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun requestRecordAudioPermission() {
+        ActivityCompat.requestPermissions(
+            this,
+            arrayOf(Manifest.permission.RECORD_AUDIO),
+            REQ_RECORD_AUDIO
+        )
+    }
+
     override fun onRequestPermissionsResult(
         requestCode: Int,
         permissions: Array<out String>,
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == REQ_RECORD_AUDIO &&
-            grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
-        ) {
-            if (localId.isNotBlank()) startCore()
-        } else {
-            binding.status.text = "Microphone permission is required"
+        if (requestCode == REQ_RECORD_AUDIO) {
+            val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
+            val action = pendingMicAction
+            pendingMicAction = null
+            if (!granted) {
+                binding.status.text = "Microphone permission is required for calls"
+                return
+            }
+            when (action) {
+                PendingMicAction.OUTGOING_CALL -> call()
+                PendingMicAction.ACCEPT_INCOMING -> acceptPendingIncoming()
+                null -> {}
+            }
         }
     }
 
@@ -405,8 +416,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun meteredTurnServer(url: String): PeerConnection.IceServer =
         PeerConnection.IceServer.builder(url)
-            .setUsername(METERED_TURN_USERNAME)
-            .setPassword(METERED_TURN_PASSWORD)
+            .setUsername(BuildConfig.TURN_USERNAME)
+            .setPassword(BuildConfig.TURN_PASSWORD)
             .createIceServer()
 
     private fun bindUI() {
@@ -474,9 +485,9 @@ class MainActivity : AppCompatActivity() {
         binding.btnChooseAuthPhoto.isEnabled = false
         binding.photoAuthStatus.text = "Reading photo"
         ioScope.launch {
-            val accountDocId = runCatching { photoAccountDocumentId(uri) }
+            val authMaterialResult = runCatching { photoAuthMaterial(uri) }
             withContext(Dispatchers.Main) {
-                if (accountDocId.isFailure) {
+                if (authMaterialResult.isFailure) {
                     binding.photoAuthStatus.text = "Photo read failed"
                     binding.btnChooseAuthPhoto.isEnabled = true
                     return@withContext
@@ -484,13 +495,16 @@ class MainActivity : AppCompatActivity() {
                 binding.photoAuthStatus.text = "Checking account"
             }
 
-            val docId = accountDocId.getOrThrow()
+            val authMaterial = authMaterialResult.getOrThrow()
+            val docId = authMaterial.documentId
             firestore.collection(PHOTO_ACCOUNTS_COLLECTION).document(docId).get()
                 .addOnSuccessListener { document ->
                     val restoredId = document.getString("localId")?.takeIf { it.isNotBlank() }
                     if (restoredId != null) {
-                        savePhotoAccount(docId, restoredId)
+                        restoreMessageKeyPairFromPhotoAccount(document, authMaterial.secret)
+                        savePhotoAccount(docId, restoredId, authMaterial.secret)
                         continueWithLocalIdentity(restoredId)
+                        backupMessageKeyPairToPhotoAccount(docId, authMaterial.secret)
                         return@addOnSuccessListener
                     }
 
@@ -504,8 +518,9 @@ class MainActivity : AppCompatActivity() {
                         ),
                         SetOptions.merge()
                     ).addOnSuccessListener {
-                        savePhotoAccount(docId, id)
+                        savePhotoAccount(docId, id, authMaterial.secret)
                         continueWithLocalIdentity(id)
+                        backupMessageKeyPairToPhotoAccount(docId, authMaterial.secret)
                     }.addOnFailureListener { error ->
                         binding.photoAuthStatus.text = "Account save failed: ${error.message}"
                         binding.btnChooseAuthPhoto.isEnabled = true
@@ -518,18 +533,22 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun savePhotoAccount(docId: String, id: String) {
+    private fun savePhotoAccount(docId: String, id: String, secret: ByteArray) {
         prefs.edit()
             .putString(KEY_PHOTO_ACCOUNT_DOC, docId)
             .putString(KEY_LOCAL_ID, id)
+            .putString(KEY_PHOTO_ACCOUNT_SECRET, b64(secret))
             .apply()
     }
 
-    private fun photoAccountDocumentId(uri: Uri): String {
+    private fun photoAuthMaterial(uri: Uri): PhotoAuthMaterial {
         val photoBytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
             ?: error("empty photo")
         val photoHash = sha256(photoBytes)
-        return sha256("$PHOTO_ACCOUNT_SALT:${hex(photoHash)}".toByteArray(Charsets.UTF_8)).let(::hex)
+        val documentId = sha256("$PHOTO_ACCOUNT_SALT:${hex(photoHash)}".toByteArray(Charsets.UTF_8))
+            .let(::hex)
+        val secret = sha256("$PHOTO_ACCOUNT_KEY_SALT:${hex(photoHash)}".toByteArray(Charsets.UTF_8))
+        return PhotoAuthMaterial(documentId, secret)
     }
 
     private fun getOrCreateLocalId(): String {
@@ -563,6 +582,7 @@ class MainActivity : AppCompatActivity() {
             .putString(KEY_MESSAGE_PUBLIC_KEY, b64(pair.public.encoded))
             .putString(KEY_MESSAGE_PRIVATE_KEY, b64(pair.private.encoded))
             .apply()
+        backupMessageKeyPairToPhotoAccount()
     }
 
     private fun localMessageKeyPair(): KeyPair {
@@ -591,6 +611,71 @@ class MainActivity : AppCompatActivity() {
         firestore.collection("users").document(localId).set(userData, SetOptions.merge())
             .addOnFailureListener { error ->
             updateDebugStatus("key publish failed: ${error.message}")
+        }
+    }
+
+    private fun backupMessageKeyPairToPhotoAccount(
+        docId: String? = prefs.getString(KEY_PHOTO_ACCOUNT_DOC, null),
+        secret: ByteArray? = prefs.getString(KEY_PHOTO_ACCOUNT_SECRET, null)?.let(::b64decode)
+    ) {
+        val firestore = db ?: return
+        val accountId = docId?.takeIf { it.isNotBlank() } ?: return
+        val bundleSecret = secret ?: return
+        val publicKey = prefs.getString(KEY_MESSAGE_PUBLIC_KEY, null) ?: return
+        val privateKey = prefs.getString(KEY_MESSAGE_PRIVATE_KEY, null) ?: return
+        val safeLocalId = localId.takeIf { it.isNotBlank() }
+            ?: prefs.getString(KEY_LOCAL_ID, null)
+            ?: return
+
+        val payload = JSONObject()
+            .put("publicKey", publicKey)
+            .put("privateKey", privateKey)
+            .put("savedAt", System.currentTimeMillis())
+            .toString()
+            .toByteArray(Charsets.UTF_8)
+        val iv = ByteArray(AES_GCM_IV_BYTES).also { SecureRandom().nextBytes(it) }
+        val cipher = Cipher.getInstance(AES_MESSAGE_ALGORITHM)
+        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(bundleSecret, "AES"), GCMParameterSpec(AES_GCM_TAG_BITS, iv))
+        val cipherText = cipher.doFinal(payload)
+
+        firestore.collection(PHOTO_ACCOUNTS_COLLECTION).document(accountId).set(
+            mapOf(
+                "localId" to safeLocalId,
+                "updatedAt" to System.currentTimeMillis(),
+                "messageKeyBundle" to b64(cipherText),
+                "messageKeyBundleIv" to b64(iv),
+                "messageKeyBundleVersion" to MESSAGE_KEY_BUNDLE_VERSION
+            ),
+            SetOptions.merge()
+        ).addOnFailureListener { error ->
+            updateDebugStatus("key backup failed: ${error.message}")
+        }
+    }
+
+    private fun restoreMessageKeyPairFromPhotoAccount(
+        document: DocumentSnapshot,
+        secret: ByteArray
+    ): Boolean {
+        val bundle = document.getString("messageKeyBundle") ?: return false
+        val iv = document.getString("messageKeyBundleIv") ?: return false
+        return runCatching {
+            val cipher = Cipher.getInstance(AES_MESSAGE_ALGORITHM)
+            cipher.init(
+                Cipher.DECRYPT_MODE,
+                SecretKeySpec(secret, "AES"),
+                GCMParameterSpec(AES_GCM_TAG_BITS, b64decode(iv))
+            )
+            val json = JSONObject(String(cipher.doFinal(b64decode(bundle)), Charsets.UTF_8))
+            val publicKey = json.getString("publicKey")
+            val privateKey = json.getString("privateKey")
+            prefs.edit()
+                .putString(KEY_MESSAGE_PUBLIC_KEY, publicKey)
+                .putString(KEY_MESSAGE_PRIVATE_KEY, privateKey)
+                .apply()
+            true
+        }.getOrElse { error ->
+            updateDebugStatus("key restore failed: ${error.message}")
+            false
         }
     }
 
@@ -657,8 +742,8 @@ class MainActivity : AppCompatActivity() {
             StringBuilder(prefs.getString(chatLogKey(id), "").orEmpty())
         }
 
-    private fun callIdFor(first: String, second: String): String =
-        listOf(first, second).sorted().joinToString("_")
+    private fun newCallId(sessionId: String): String =
+        "call_$sessionId"
 
     private fun savedContactIds(): Set<String> =
         prefs.getStringSet(KEY_CONTACT_IDS, emptySet()).orEmpty()
@@ -948,6 +1033,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun call() = ioScope.launch {
+        if (!hasRecordAudioPermission()) {
+            pendingMicAction = PendingMicAction.OUTGOING_CALL
+            runOnUiThread {
+                binding.status.text = "Allow microphone to start a call"
+                requestRecordAudioPermission()
+            }
+            return@launch
+        }
         val firestore = firestoreOrWarn() ?: return@launch
         val targetId = selectedContactId()
         if (targetId.isBlank()) {
@@ -960,10 +1053,10 @@ class MainActivity : AppCompatActivity() {
         }
 
         remoteId = targetId
-        val callId = callIdFor(localId, remoteId)
-        resetPeerConnection(createLocalChannels = true)
-        currentCallId = callId
         val sessionId = "$localId-${System.currentTimeMillis()}"
+        val callId = newCallId(sessionId)
+        withContext(Dispatchers.Main) { resetPeerConnection(createLocalChannels = true) }
+        currentCallId = callId
         currentSessionId = sessionId
         runOnUiThread { showOutgoingCallScreen() }
         startCallSetupTimeout(callId, sessionId)
@@ -1006,6 +1099,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun accept() = ioScope.launch {
+        if (!hasRecordAudioPermission()) {
+            pendingMicAction = PendingMicAction.ACCEPT_INCOMING
+            runOnUiThread {
+                binding.status.text = "Allow microphone to answer the call"
+                requestRecordAudioPermission()
+            }
+            return@launch
+        }
         pendingIncomingCall?.let {
             acceptPendingIncoming()
             return@launch
@@ -1102,6 +1203,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun acceptPendingIncoming() {
+        if (!hasRecordAudioPermission()) {
+            pendingMicAction = PendingMicAction.ACCEPT_INCOMING
+            binding.status.text = "Allow microphone to answer the call"
+            requestRecordAudioPermission()
+            return
+        }
         val incoming = pendingIncomingCall ?: run {
             binding.status.text = "No incoming call"
             return
@@ -1160,7 +1267,8 @@ class MainActivity : AppCompatActivity() {
                                         "answerSessionId" to incoming.sessionId,
                                         "answer" to desc.description,
                                         "answerMode" to currentVoiceMode.label,
-                                        "state" to "accepted"
+                                        "state" to "answered",
+                                        "answeredAt" to System.currentTimeMillis()
                                     )
                                 ).addOnFailureListener { error ->
                                     updateDebugStatus("answer write failed: ${error.message}")
@@ -1430,6 +1538,7 @@ class MainActivity : AppCompatActivity() {
         val firestore = db ?: return
         firestore.collection("messages")
             .whereEqualTo("to", localId)
+            .limit(50)
             .get()
             .addOnSuccessListener { snap ->
                 snap.documents.forEach { processCloudMessage(it) }
@@ -1478,6 +1587,7 @@ class MainActivity : AppCompatActivity() {
             decryptMessage(encryptedKey, iv, cipherText, keyAlgorithm)
         }.getOrElse { error ->
             updateDebugStatus("decrypt failed: ${error.message}")
+            deleteCloudMessage(document)
             null
         }
     }
@@ -1523,24 +1633,20 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun rsaEncrypt(bytes: ByteArray, publicKey: PublicKey): RsaCipherBytes {
-        val algorithms = listOf(RSA_OAEP_SHA256, RSA_OAEP_SHA1)
-        algorithms.forEach { algorithm ->
-            runCatching {
-                val cipher = Cipher.getInstance(algorithm)
-                cipher.init(Cipher.ENCRYPT_MODE, publicKey)
-                return RsaCipherBytes(cipher.doFinal(bytes), algorithm)
-            }
-        }
-        error("No RSA encryption provider")
+        val cipher = Cipher.getInstance(RSA_OAEP_SHA256)
+        cipher.init(Cipher.ENCRYPT_MODE, publicKey)
+        return RsaCipherBytes(cipher.doFinal(bytes), RSA_OAEP_SHA256)
     }
 
     private fun rsaDecrypt(bytes: ByteArray, privateKey: PrivateKey, keyAlgorithm: String): ByteArray {
         val algorithms = listOf(keyAlgorithm, RSA_OAEP_SHA256, RSA_OAEP_SHA1).distinct()
-        algorithms.forEach { algorithm ->
+        algorithms.forEachIndexed { index, algorithm ->
             runCatching {
                 val cipher = Cipher.getInstance(algorithm)
                 cipher.init(Cipher.DECRYPT_MODE, privateKey)
-                return cipher.doFinal(bytes)
+                val result = cipher.doFinal(bytes)
+                if (index > 0) Log.w(TAG, "rsaDecrypt: fell back to $algorithm — message encrypted with old scheme")
+                return result
             }
         }
         error("No RSA decryption provider")
@@ -1562,6 +1668,11 @@ class MainActivity : AppCompatActivity() {
     private fun markMessageSeen(id: String) {
         synchronized(receivedMessageIds) {
             receivedMessageIds.add(id)
+            if (receivedMessageIds.size > 500) {
+                val excess = receivedMessageIds.size - 500
+                val toRemove = receivedMessageIds.take(excess)
+                receivedMessageIds.removeAll(toRemove.toSet())
+            }
             prefs.edit().putStringSet(KEY_SEEN_MESSAGE_IDS, receivedMessageIds.toSet()).apply()
         }
     }
@@ -1626,6 +1737,10 @@ class MainActivity : AppCompatActivity() {
         if (channel.state() != DataChannel.State.OPEN) return false
 
         val bytes = packet.toByteArray(Charsets.UTF_8)
+        if (bytes.size > 16 * 1024) {
+            Log.e(TAG, "sendMessagePacket: packet too large (${bytes.size} bytes), dropping")
+            return false
+        }
         return channel.send(DataChannel.Buffer(ByteBuffer.wrap(bytes), false))
     }
 
@@ -1649,8 +1764,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun nextMessageId(): String {
-        messageSeq += 1
-        return "$localId-${System.currentTimeMillis()}-$messageSeq"
+        val seq = messageSeqCounter.incrementAndGet()
+        return "$localId-${System.currentTimeMillis()}-$seq"
     }
 
     private fun appendMessage(chatId: String, author: String, text: String) {
@@ -2153,7 +2268,8 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        firestore.collection("calls").document(callId).update(
+        val callRef = firestore.collection("calls").document(callId)
+        callRef.update(
             mapOf(
                 "state" to "ended",
                 "endedBy" to localId,
@@ -2166,6 +2282,10 @@ class MainActivity : AppCompatActivity() {
             returnToPostCallScreen()
             showCallControls(false)
             updateDebugStatus("disconnected")
+            // Clean up Firestore call document so stale data doesn't accumulate
+            callRef.delete().addOnFailureListener { e ->
+                Log.w(TAG, "clearCallDocument failed: ${e.message}")
+            }
         }
     }
 
@@ -2300,6 +2420,7 @@ class MainActivity : AppCompatActivity() {
         private const val PREFS_NAME = "xxxlink_prefs"
         private const val KEY_LOCAL_ID = "local_id"
         private const val KEY_PHOTO_ACCOUNT_DOC = "photo_account_doc"
+        private const val KEY_PHOTO_ACCOUNT_SECRET = "photo_account_secret"
         private const val KEY_MESSAGE_PUBLIC_KEY = "message_public_key"
         private const val KEY_MESSAGE_PRIVATE_KEY = "message_private_key"
         private const val KEY_CONTACT_IDS = "contact_ids"
@@ -2310,13 +2431,12 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_UNREAD_NOTIFICATION_COUNT = "unread_notification_count"
         private const val PHOTO_ACCOUNTS_COLLECTION = "photoAccounts"
         private const val PHOTO_ACCOUNT_SALT = "x-link-photo-account-v1"
+        private const val PHOTO_ACCOUNT_KEY_SALT = "x-link-photo-key-v1"
+        private const val MESSAGE_KEY_BUNDLE_VERSION = 1
         private const val NOTIFICATION_CALLS_CHANNEL_ID = "xxxlink_calls_v3"
         private const val NOTIFICATION_MESSAGES_CHANNEL_ID = "xxxlink_messages_v3"
         private const val NOTIFICATION_CALL_ID = 5001
         private const val NOTIFICATION_MESSAGE_ID_BASE = 6000
-        private const val METERED_TURN_USERNAME = "adf897ba2cd48862e125b3e7"
-        private const val METERED_TURN_PASSWORD = "jMbM3vnWcjOX7Vt2"
-
         private fun sharedCodecBytesPerFrame(codec2Mode: Int?): Int =
             when (codec2Mode) {
                 0 -> 8
@@ -2375,10 +2495,20 @@ class MainActivity : AppCompatActivity() {
         val keyAlgorithm: String
     )
 
+    private data class PhotoAuthMaterial(
+        val documentId: String,
+        val secret: ByteArray
+    )
+
     private data class RsaCipherBytes(
         val bytes: ByteArray,
         val algorithm: String
     )
+
+    private enum class PendingMicAction {
+        OUTGOING_CALL,
+        ACCEPT_INCOMING
+    }
 }
 
 open class SdpObserverAdapter : SdpObserver {

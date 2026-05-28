@@ -53,12 +53,42 @@ service cloud.firestore {
       allow list: if false;
 
       allow create: if accountId.matches('^[a-f0-9]{64}$') &&
-        request.resource.data.keys().hasOnly(['localId', 'createdAt', 'updatedAt']) &&
+        request.resource.data.keys().hasOnly([
+          'localId',
+          'createdAt',
+          'updatedAt',
+          'messageKeyBundle',
+          'messageKeyBundleIv',
+          'messageKeyBundleVersion'
+        ]) &&
         isShortId(request.resource.data.localId) &&
         isClientMillis(request.resource.data.createdAt) &&
-        isClientMillis(request.resource.data.updatedAt);
+        isClientMillis(request.resource.data.updatedAt) &&
+        isOptionalString('messageKeyBundle', 16384) &&
+        isOptionalString('messageKeyBundleIv', 256) &&
+        (!('messageKeyBundleVersion' in request.resource.data) ||
+          request.resource.data.messageKeyBundleVersion is int);
 
-      allow update, delete: if false;
+      allow update: if accountId.matches('^[a-f0-9]{64}$') &&
+        resource.data.localId == request.resource.data.localId &&
+        resource.data.createdAt == request.resource.data.createdAt &&
+        request.resource.data.keys().hasOnly([
+          'localId',
+          'createdAt',
+          'updatedAt',
+          'messageKeyBundle',
+          'messageKeyBundleIv',
+          'messageKeyBundleVersion'
+        ]) &&
+        isShortId(request.resource.data.localId) &&
+        isClientMillis(request.resource.data.createdAt) &&
+        isClientMillis(request.resource.data.updatedAt) &&
+        isOptionalString('messageKeyBundle', 16384) &&
+        isOptionalString('messageKeyBundleIv', 256) &&
+        (!('messageKeyBundleVersion' in request.resource.data) ||
+          request.resource.data.messageKeyBundleVersion is int);
+
+      allow delete: if false;
     }
 
     match /messages/{messageId} {
