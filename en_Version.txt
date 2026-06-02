@@ -67,6 +67,14 @@ New features:
 - *Android `versionCode` increased to `132` for the v1.13.2 beta APK.*
 - *The APK artifact is published in the repository under the v1.13.2 beta name.*
 
+Version v1.13.3
+
+New features:
+
+- *Android `versionName` updated to `1.13.3-beta`.*
+- *Android `versionCode` increased to `133` for the v1.13.3 beta APK.*
+- *The APK is signed with the same certificate as v1.12 so it can update older installed builds.*
+
 Next versions:
 
 - Add a new version chapter below this one.
