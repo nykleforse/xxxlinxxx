@@ -1998,7 +1998,12 @@ class MainActivity : AppCompatActivity() {
     private fun processCloudMessage(document: DocumentSnapshot) {
         val id = document.id
         val senderId = document.getString("from") ?: return
-        if (senderId == localId) return
+        // DIAGNOSTIC (v1.14.2)
+        Log.d("XLINK_CLOUD", "fetch id=$id from=$senderId to=${document.getString("to")} localId=$localId")
+        if (senderId == localId) {
+            Log.d("XLINK_CLOUD", "filtered (own send): id=$id")
+            return
+        }
         val text = decryptCloudMessage(document)?.takeIf { it.isNotBlank() } ?: return
 
         val isNew = synchronized(receivedMessageIds) {
@@ -2314,6 +2319,19 @@ class MainActivity : AppCompatActivity() {
         // Last-line defence: blank/whitespace text must never reach the chat log.
         // Photo bubbles arrive as "[PHOTO:path]" which is not blank, so this is safe.
         if (text.isBlank()) return
+        // ── DIAGNOSTIC (v1.14.2): trace every write so we can find which path
+        //    produces the outgoing-rendered-as-incoming bug ("Олрн" on left side).
+        //    Strip after the bug is identified.
+        runCatching {
+            val st = Thread.currentThread().stackTrace
+            val caller = st.drop(3).take(5).joinToString(" ← ") { "${it.methodName}:${it.lineNumber}" }
+            val thread = Thread.currentThread().name
+            val flag = if (author == "Me") "→OUT" else "←IN"
+            val textPreview = text.take(40).replace("\n", "\\n")
+            Log.d("XLINK_APPEND",
+                "$flag chatId=$chatId author='$author' msgId=$msgId text='$textPreview' " +
+                "thread=$thread localId=$localId remoteId=$remoteId caller=$caller")
+        }
         val update = {
             val log = messageLogFor(chatId)
             // Embed msgId in author field for outgoing messages: "Me|{msgId}: text\t{ts}"
@@ -2437,8 +2455,16 @@ class MainActivity : AppCompatActivity() {
         // Legacy format: "Me: text"
         if (text.startsWith("Me: ")) return "Me" to text.removePrefix("Me: ")
         val ci = text.indexOf(": ")
-        return if (ci >= 0) text.substring(0, ci) to text.substring(ci + 2)
-        else "" to text
+        val result = if (ci >= 0) text.substring(0, ci) to text.substring(ci + 2)
+                     else "" to text
+        // ── DIAGNOSTIC (v1.14.2): log when parser classifies an entry as
+        //    INCOMING. If the bug ever produces "Олрн" on the wrong side,
+        //    this dump shows exactly what the stored entry looks like and
+        //    the inferred author. Strip after the bug is identified.
+        Log.d("XLINK_PARSE",
+            "←IN author='${result.first}' text='${result.second.take(40).replace("\n", "\\n")}' " +
+            "raw='${text.take(80).replace("\n", "\\n")}'")
+        return result
     }
 
     private fun formatMessageTime(epochMs: Long): String {
