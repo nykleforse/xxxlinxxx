@@ -2030,12 +2030,7 @@ class MainActivity : AppCompatActivity() {
     private fun processCloudMessage(document: DocumentSnapshot) {
         val id = document.id
         val senderId = document.getString("from") ?: return
-        // DIAGNOSTIC (v1.14.2)
-        Log.d("XLINK_CLOUD", "fetch id=$id from=$senderId to=${document.getString("to")} localId=$localId")
-        if (senderId == localId) {
-            Log.d("XLINK_CLOUD", "filtered (own send): id=$id")
-            return
-        }
+        if (senderId == localId) return
         val text = decryptCloudMessage(document)?.takeIf { it.isNotBlank() } ?: return
 
         val isNew = synchronized(receivedMessageIds) {
@@ -2053,7 +2048,9 @@ class MainActivity : AppCompatActivity() {
             mapOf("from" to localId, "to" to senderId,
                   "delivered" to true, "read" to false,
                   "createdAt" to System.currentTimeMillis())
-        )
+        )?.addOnFailureListener { e ->
+            Log.w(TAG, "delivery receipt write failed msgId=$id err=${e.message}")
+        }
 
         runOnUiThread {
             rememberContact(senderId)
@@ -2351,19 +2348,6 @@ class MainActivity : AppCompatActivity() {
         // Last-line defence: blank/whitespace text must never reach the chat log.
         // Photo bubbles arrive as "[PHOTO:path]" which is not blank, so this is safe.
         if (text.isBlank()) return
-        // ── DIAGNOSTIC (v1.14.2): trace every write so we can find which path
-        //    produces the outgoing-rendered-as-incoming bug ("Олрн" on left side).
-        //    Strip after the bug is identified.
-        runCatching {
-            val st = Thread.currentThread().stackTrace
-            val caller = st.drop(3).take(5).joinToString(" ← ") { "${it.methodName}:${it.lineNumber}" }
-            val thread = Thread.currentThread().name
-            val flag = if (author == "Me") "→OUT" else "←IN"
-            val textPreview = text.take(40).replace("\n", "\\n")
-            Log.d("XLINK_APPEND",
-                "$flag chatId=$chatId author='$author' msgId=$msgId text='$textPreview' " +
-                "thread=$thread localId=$localId remoteId=$remoteId caller=$caller")
-        }
         val update = {
             val log = messageLogFor(chatId)
             // Embed msgId in author field for outgoing messages: "Me|{msgId}: text\t{ts}"
