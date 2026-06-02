@@ -18,13 +18,14 @@ android {
     namespace = "com.example.xxxlinkxxx"
     compileSdk = 34
     ndkVersion = "26.1.10909125"
+    val projectDebugKeystore = file("signing/debug.keystore")
 
     defaultConfig {
         applicationId = "com.example.xxxlinkxxx"
         minSdk = 21
         targetSdk = 34
-        versionCode = 14
-        versionName = "1.14-beta"
+        versionCode = 134
+        versionName = "1.13.4-beta"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
@@ -38,20 +39,22 @@ android {
     }
 
     signingConfigs {
-        // Re-use the standard debug keystore for all builds so release APKs install directly.
-        // Replace with a real keystore before publishing to Play Store.
         getByName("debug") {
-            storeFile = file("${System.getProperty("user.home")}/.android/debug.keystore")
-            storePassword = "android"
-            keyAlias = "androiddebugkey"
-            keyPassword = "android"
+            if (projectDebugKeystore.exists()) {
+                storeFile = projectDebugKeystore
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
         }
     }
 
     buildTypes {
         getByName("release") {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("debug")
+            if (projectDebugKeystore.exists()) {
+                signingConfig = signingConfigs.getByName("debug")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -59,7 +62,9 @@ android {
         }
         getByName("debug") {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("debug")
+            if (projectDebugKeystore.exists()) {
+                signingConfig = signingConfigs.getByName("debug")
+            }
         }
     }
 

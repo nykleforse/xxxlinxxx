@@ -19,6 +19,7 @@ node_modules/
 functions/node_modules/
 firebase-debug.log
 firebase-debug.*.log
+app/signing/
 # uiautomator window dumps
 *_window_*.xml
 # Android Studio
