@@ -59,6 +59,14 @@ New features:
 - *Text messages stay queued and retry automatically when the network or VPN is unstable.*
 - *Direct phone-to-phone photo transfer through WebRTC DataChannel was restored without storing photos on Firebase.*
 
+Version v1.13.2
+
+New features:
+
+- *Android `versionName` updated to `1.13.2-beta`.*
+- *Android `versionCode` increased to `132` for the v1.13.2 beta APK.*
+- *The APK artifact is published in the repository under the v1.13.2 beta name.*
+
 Next versions:
 
 - Add a new version chapter below this one.
