@@ -1019,6 +1019,17 @@ class MainActivity : AppCompatActivity() {
 
     private fun chatLogKey(id: String): String = "$KEY_CHAT_LOG_PREFIX$id"
 
+    /**
+     * Timestamp of the most recent message in the chat log for [id], or 0
+     * if the chat is empty / has no entries with timestamps. Used to sort
+     * the contacts list so the latest-activity chat appears on top.
+     */
+    private fun lastChatActivity(id: String): Long {
+        val lines = splitLogLines(messageLogFor(id).toString())
+        if (lines.isEmpty()) return 0L
+        return lineTimestamp(lines.last())
+    }
+
     private fun messageLogFor(id: String): StringBuilder =
         messageLogs.getOrPut(id) {
             val raw = prefs.getString(chatLogKey(id), "").orEmpty()
@@ -1126,7 +1137,12 @@ class MainActivity : AppCompatActivity() {
         updateUnreadBadge()
         binding.contactsList.removeAllViews()
         val contacts = savedContactIds()
-            .sortedWith(compareBy<String> { contactName(it).lowercase(Locale.US) }.thenBy { it })
+            .sortedWith(
+                // Most recent activity first; alphabetical fallback for empty chats.
+                compareByDescending<String> { lastChatActivity(it) }
+                    .thenBy { contactName(it).lowercase(Locale.US) }
+                    .thenBy { it }
+            )
         if (contacts.isEmpty()) {
             val empty = TextView(this).apply {
                 text = "No contacts yet"
