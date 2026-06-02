@@ -1021,8 +1021,52 @@ class MainActivity : AppCompatActivity() {
 
     private fun messageLogFor(id: String): StringBuilder =
         messageLogs.getOrPut(id) {
-            StringBuilder(prefs.getString(chatLogKey(id), "").orEmpty())
+            val raw = prefs.getString(chatLogKey(id), "").orEmpty()
+            val cleaned = stripBlankEntries(raw)
+            // Persist cleaned log so the unread-count baseline matches what we render
+            // and historical blank entries stop counting toward the unread badge.
+            if (cleaned != raw) {
+                prefs.edit().putString(chatLogKey(id), cleaned).apply()
+                // Also clamp read-count: stored count may have referenced the now-removed
+                // blanks; clamp so renderContacts() doesn't think there are new messages.
+                val readKey = "$KEY_CHAT_READ_PREFIX$id"
+                val storedCount = prefs.getInt(readKey, 0)
+                val newSize = splitLogLines(cleaned).size
+                if (storedCount > newSize) {
+                    prefs.edit().putInt(readKey, newSize).apply()
+                }
+            }
+            StringBuilder(cleaned)
         }
+
+    /**
+     * Rewrites a raw log dropping entries whose displayable text is blank.
+     * Preserves the structural `\t{ts}\n` boundary that splitLogLines relies on.
+     */
+    private fun stripBlankEntries(log: String): String {
+        if (log.isEmpty()) return log
+        val sb = StringBuilder(log.length)
+        val re = Regex("""\t\d{10,}\n""")
+        var pos = 0
+        for (m in re.findAll(log)) {
+            val end = m.range.last + 1
+            // entry = "Me|abc: text\t1733262000000" (boundary tab+ts kept, trailing \n trimmed)
+            val entry = log.substring(pos, end).trimEnd('\n')
+            if (entry.isNotEmpty() && !isBlankEntry(entry)) {
+                sb.append(entry).append('\n')
+            }
+            pos = end
+        }
+        // Legacy tail (no timestamp boundary) — keep non-blank lines as-is
+        if (pos < log.length) {
+            log.substring(pos).split('\n').forEach { line ->
+                if (line.isNotEmpty() && !isBlankEntry(line)) {
+                    sb.append(line).append('\n')
+                }
+            }
+        }
+        return sb.toString()
+    }
 
     private fun newCallId(sessionId: String): String =
         "call_$sessionId"
@@ -2179,6 +2223,9 @@ class MainActivity : AppCompatActivity() {
                 if (!isNew) return
 
                 val text = String(Base64.decode(payload, Base64.NO_WRAP), Charsets.UTF_8)
+                // Skip blank/whitespace-only packets — they render as empty bubbles
+                // and inflate the unread-count badge.
+                if (text.isBlank()) return
                 val chatId = remoteId.takeIf { it.isNotBlank() } ?: "unknown"
                 incomingMsgIds.getOrPut(chatId) { mutableListOf() }.add(id)
                 appendMessage(chatId, contactName(chatId), text)
@@ -2264,6 +2311,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun appendMessage(chatId: String, author: String, text: String, msgId: String? = null) {
+        // Last-line defence: blank/whitespace text must never reach the chat log.
+        // Photo bubbles arrive as "[PHOTO:path]" which is not blank, so this is safe.
+        if (text.isBlank()) return
         val update = {
             val log = messageLogFor(chatId)
             // Embed msgId in author field for outgoing messages: "Me|{msgId}: text\t{ts}"
@@ -2314,14 +2364,27 @@ class MainActivity : AppCompatActivity() {
         for (m in re.findAll(log)) {
             val end = m.range.last + 1        // include the trailing \n
             val entry = log.substring(pos, end).trimEnd('\n')
-            if (entry.isNotEmpty()) result.add(entry)
+            if (entry.isNotEmpty() && !isBlankEntry(entry)) result.add(entry)
             pos = end
         }
         // Legacy entries without timestamp that might remain after pos
         if (pos < log.length) {
-            log.substring(pos).split('\n').filter { it.isNotEmpty() }.forEach { result.add(it) }
+            log.substring(pos).split('\n')
+                .filter { it.isNotEmpty() && !isBlankEntry(it) }
+                .forEach { result.add(it) }
         }
         return result
+    }
+
+    /**
+     * True if a raw log entry has no displayable message body (whitespace only
+     * after the author marker). Filters out junk that historically polluted the
+     * unread-count badge and rendered as empty bubbles below the "New messages"
+     * divider.
+     */
+    private fun isBlankEntry(entry: String): Boolean {
+        val (_, text) = parseLineAuthorText(entry)
+        return text.isBlank()
     }
 
     private fun lineText(line: String): String {
