@@ -1022,13 +1022,13 @@ class MainActivity : AppCompatActivity() {
     private fun messageLogFor(id: String): StringBuilder =
         messageLogs.getOrPut(id) {
             val raw = prefs.getString(chatLogKey(id), "").orEmpty()
-            val cleaned = stripBlankEntries(raw)
-            // Persist cleaned log so the unread-count baseline matches what we render
-            // and historical blank entries stop counting toward the unread badge.
+            // Two-stage migration:
+            //   1. trim leading whitespace from each entry (Codex v1.13.x
+            //      corruption — caused outgoing msgs to render as incoming);
+            //   2. drop entries whose displayable text is blank.
+            val cleaned = stripBlankEntries(trimEntryWhitespace(raw))
             if (cleaned != raw) {
                 prefs.edit().putString(chatLogKey(id), cleaned).apply()
-                // Also clamp read-count: stored count may have referenced the now-removed
-                // blanks; clamp so renderContacts() doesn't think there are new messages.
                 val readKey = "$KEY_CHAT_READ_PREFIX$id"
                 val storedCount = prefs.getInt(readKey, 0)
                 val newSize = splitLogLines(cleaned).size
@@ -1038,6 +1038,38 @@ class MainActivity : AppCompatActivity() {
             }
             StringBuilder(cleaned)
         }
+
+    /**
+     * Rewrites a raw log trimming leading whitespace from each entry.
+     * Preserves the structural `\t{ts}\n` boundary that splitLogLines uses.
+     * Fixes the Codex-build corruption where entries were stored as
+     * "    Me|{id}: text\t{ts}\n" — the four leading spaces broke
+     * parseLineAuthorText so all such entries rendered as incoming.
+     */
+    private fun trimEntryWhitespace(log: String): String {
+        if (log.isEmpty()) return log
+        val sb = StringBuilder(log.length)
+        val re = Regex("""\t\d{10,}\n""")
+        var pos = 0
+        for (m in re.findAll(log)) {
+            val end = m.range.last + 1
+            val entry = log.substring(pos, end).trimEnd('\n')
+            // Trim only leading whitespace (spaces, tabs other than the
+            // boundary one before timestamp, and any zero-width junk).
+            val trimmed = entry.trimStart()
+            if (trimmed.isNotEmpty()) {
+                sb.append(trimmed).append('\n')
+            }
+            pos = end
+        }
+        if (pos < log.length) {
+            log.substring(pos).split('\n').forEach { line ->
+                val trimmed = line.trimStart()
+                if (trimmed.isNotEmpty()) sb.append(trimmed).append('\n')
+            }
+        }
+        return sb.toString()
+    }
 
     /**
      * Rewrites a raw log dropping entries whose displayable text is blank.
@@ -2418,7 +2450,11 @@ class MainActivity : AppCompatActivity() {
 
     /** Extract msgId embedded in outgoing log lines: "Me|{msgId}: text" → msgId, or null for old format. */
     private fun lineMsgId(line: String): String? {
-        val text = lineText(line)
+        // trimStart() — same Codex v1.13.x leading-whitespace corruption fix
+        // as in parseLineAuthorText(). Without it, lookup of status for
+        // outgoing messages restored from those builds returns null and the
+        // ✓ marker disappears.
+        val text = lineText(line).trimStart()
         if (!text.startsWith("Me|")) return null
         val sep = text.indexOf(": ")
         return if (sep > 3) text.substring(3, sep) else null
@@ -2446,7 +2482,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun parseLineAuthorText(line: String): Pair<String, String> {
-        val text = lineText(line)
+        // trimStart() handles entries written by an older code path that
+        // accidentally prefixed the author field with whitespace (observed
+        // in chat logs migrated from Codex v1.13.x builds — caused outgoing
+        // messages to render as incoming because "    Me|..." did not match
+        // startsWith("Me|")).
+        val text = lineText(line).trimStart()
         // New format: "Me|{msgId}: text" — strip msgId from author
         if (text.startsWith("Me|")) {
             val sep = text.indexOf(": ")
@@ -2455,16 +2496,8 @@ class MainActivity : AppCompatActivity() {
         // Legacy format: "Me: text"
         if (text.startsWith("Me: ")) return "Me" to text.removePrefix("Me: ")
         val ci = text.indexOf(": ")
-        val result = if (ci >= 0) text.substring(0, ci) to text.substring(ci + 2)
-                     else "" to text
-        // ── DIAGNOSTIC (v1.14.2): log when parser classifies an entry as
-        //    INCOMING. If the bug ever produces "Олрн" on the wrong side,
-        //    this dump shows exactly what the stored entry looks like and
-        //    the inferred author. Strip after the bug is identified.
-        Log.d("XLINK_PARSE",
-            "←IN author='${result.first}' text='${result.second.take(40).replace("\n", "\\n")}' " +
-            "raw='${text.take(80).replace("\n", "\\n")}'")
-        return result
+        return if (ci >= 0) text.substring(0, ci) to text.substring(ci + 2)
+               else "" to text
     }
 
     private fun formatMessageTime(epochMs: Long): String {
