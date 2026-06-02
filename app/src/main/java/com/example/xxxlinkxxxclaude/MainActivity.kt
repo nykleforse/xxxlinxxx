@@ -102,9 +102,13 @@ class MainActivity : AppCompatActivity() {
     private var txVoiceSeq = 0
     private var rxVoiceSeq: Int? = null
     private val messageLogs = mutableMapOf<String, StringBuilder>()
-    private val pendingMessages = mutableMapOf<String, String>()
+    private val pendingMessages = mutableMapOf<String, PendingTextMessage>()
+    private val sendingCloudMessages = mutableSetOf<String>()
     private val receivedMessageIds = mutableSetOf<String>()
     private var messageSeq = 0
+    private lateinit var directPhotoTransfer: DirectPhotoTransfer
+    private var pendingDirectPhoto: PendingDirectPhoto? = null
+    private var receiptPollJob: Job? = null
     private var coreStarted = false
     private var currentVoiceMode = VoiceMode.BASE
     private var applyingRemoteMode = false
@@ -119,12 +123,26 @@ class MainActivity : AppCompatActivity() {
     private val photoAuthPicker = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let { authenticateWithPhoto(it) }
     }
+    private val directPhotoPicker = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        uri?.let { queueDirectPhoto(it) }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
         createNotificationChannel()
+        directPhotoTransfer = DirectPhotoTransfer(
+            context = this,
+            sendPacket = { packet -> sendMessagePacket(packet) },
+            onPhotoReceived = { _, fileName ->
+                val chatId = remoteId.takeIf { it.isNotBlank() } ?: "unknown"
+                appendMessage(chatId, contactName(chatId), "[Photo received: $fileName]")
+            },
+            onPhotoAck = { id ->
+                updateOutgoingMessageStatus(remoteId, id, MESSAGE_STATUS_RECEIVED)
+            }
+        )
 
         prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         initFirebase()
@@ -147,6 +165,7 @@ class MainActivity : AppCompatActivity() {
         prefs.edit().putString(KEY_LOCAL_ID, localId).apply()
         ensureMessageKeyPair()
         receivedMessageIds += prefs.getStringSet(KEY_SEEN_MESSAGE_IDS, emptySet()).orEmpty()
+        loadPendingTextMessages()
         binding.myId.text = "Your ID: $localId"
         binding.photoAuthScreen.visibility = View.GONE
         binding.contactListScreen.visibility = View.VISIBLE
@@ -209,6 +228,8 @@ class MainActivity : AppCompatActivity() {
         syncFcmRegistrationToken()
         listenIncomingCalls()
         startMessagePolling()
+        startReceiptPolling()
+        attemptSendPendingCloudMessages()
     }
 
     private fun hasRecordAudioPermission(): Boolean =
@@ -417,6 +438,7 @@ class MainActivity : AppCompatActivity() {
         binding.btnCall.setOnClickListener {
             call()
         }
+        binding.btnSendPhoto.setOnClickListener { chooseDirectPhoto() }
         binding.btnAccept.setOnClickListener {
             accept()
         }
@@ -652,6 +674,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun chatLogKey(id: String): String = "$KEY_CHAT_LOG_PREFIX$id"
 
+    private fun outgoingTextKey(id: String): String = "$KEY_OUTGOING_TEXT_PREFIX$id"
+
+    private fun outgoingChatKey(id: String): String = "$KEY_OUTGOING_CHAT_PREFIX$id"
+
     private fun messageLogFor(id: String): StringBuilder =
         messageLogs.getOrPut(id) {
             StringBuilder(prefs.getString(chatLogKey(id), "").orEmpty())
@@ -730,7 +756,7 @@ class MainActivity : AppCompatActivity() {
     private fun openChat(id: String) {
         remoteId = id
         binding.chatTitle.text = contactName(id)
-        binding.messages.text = messageLogFor(id).toString()
+        renderMessages(id)
         binding.contactListScreen.visibility = View.GONE
         binding.addContactScreen.visibility = View.GONE
         binding.chatScreen.visibility = View.VISIBLE
@@ -1332,6 +1358,9 @@ class MainActivity : AppCompatActivity() {
             }
             override fun onStateChange() {
                 updateDebugStatus("msg=${dc.state()}")
+                if (dc.state() == DataChannel.State.OPEN) {
+                    flushPendingDirectPhoto()
+                }
             }
             override fun onBufferedAmountChange(p0: Long) {}
         })
@@ -1351,69 +1380,17 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        val firestore = firestoreOrWarn() ?: return
         val id = nextMessageId()
-        binding.btnSend.isEnabled = false
-
-        firestore.collection("users").document(targetId).get()
-            .addOnSuccessListener { userDoc ->
-                val publicKeyB64 = userDoc.getString("messagePublicKey")
-                if (publicKeyB64.isNullOrBlank()) {
-                    runOnUiThread {
-                        binding.btnSend.isEnabled = true
-                        binding.status.text = "Contact encryption key not found"
-                        binding.chatStatus.text = "Contact encryption key not found"
-                    }
-                    return@addOnSuccessListener
-                }
-
-                val encrypted = runCatching {
-                    encryptMessageFor(text, publicKeyB64)
-                }.getOrElse { error ->
-                    runOnUiThread {
-                        binding.btnSend.isEnabled = true
-                        binding.status.text = "Encrypt failed: ${error.message}"
-                        binding.chatStatus.text = "Encrypt failed: ${error.message}"
-                    }
-                    return@addOnSuccessListener
-                }
-
-                val message = mapOf(
-                    "from" to localId,
-                    "to" to targetId,
-                    "encryptedKey" to encrypted.encryptedKey,
-                    "iv" to encrypted.iv,
-                    "cipherText" to encrypted.cipherText,
-                    "messageAlgorithm" to AES_MESSAGE_ALGORITHM,
-                    "keyAlgorithm" to encrypted.keyAlgorithm,
-                    "createdAt" to System.currentTimeMillis()
-                )
-
-                firestore.collection("messages").document(id).set(message)
-                    .addOnSuccessListener {
-                        markMessageSeen(id)
-                        binding.messageInput.text?.clear()
-                        appendMessage(targetId, "Me", text)
-                        runOnUiThread {
-                            binding.btnSend.isEnabled = true
-                            binding.status.text = "Encrypted sent to ${contactName(targetId)}"
-                            binding.chatStatus.text = "Encrypted sent to ${contactName(targetId)}"
-                        }
-                    }
-                    .addOnFailureListener { error ->
-                        runOnUiThread {
-                            binding.btnSend.isEnabled = true
-                            binding.status.text = "Send failed: ${error.message}"
-                            binding.chatStatus.text = "Send failed: ${error.message}"
-                        }
-                    }
-            }.addOnFailureListener { error ->
-                runOnUiThread {
-                    binding.btnSend.isEnabled = true
-                    binding.status.text = "Key fetch failed: ${error.message}"
-                    binding.chatStatus.text = "Key fetch failed: ${error.message}"
-                }
-            }
+        val pending = PendingTextMessage(
+            id = id,
+            targetId = targetId,
+            text = text,
+            createdAt = System.currentTimeMillis()
+        )
+        binding.messageInput.text?.clear()
+        appendOutgoingMessage(targetId, id, text, MESSAGE_STATUS_WAITING)
+        savePendingTextMessage(pending)
+        sendPendingCloudMessage(id)
     }
 
     private fun startMessagePolling() {
@@ -1422,6 +1399,17 @@ class MainActivity : AppCompatActivity() {
             while (isActive) {
                 delay(MESSAGE_POLL_MS)
                 pollCloudMessages()
+                attemptSendPendingCloudMessages()
+            }
+        }
+    }
+
+    private fun startReceiptPolling() {
+        receiptPollJob?.cancel()
+        receiptPollJob = ioScope.launch {
+            while (isActive) {
+                delay(RECEIPT_POLL_MS)
+                pollMessageReceipts()
             }
         }
     }
@@ -1457,6 +1445,7 @@ class MainActivity : AppCompatActivity() {
         runOnUiThread {
             rememberContact(senderId)
             appendMessage(senderId, contactName(senderId), text)
+            markCloudMessageReceived(id, senderId)
             notifyIncomingMessage(senderId, text)
             binding.status.text = "Message from ${contactName(senderId)}"
             if (remoteId == senderId && binding.chatScreen.visibility == View.VISIBLE) {
@@ -1553,6 +1542,221 @@ class MainActivity : AppCompatActivity() {
             }
     }
 
+    private fun markCloudMessageReceived(messageId: String, senderId: String) {
+        val firestore = db ?: return
+        firestore.collection(MESSAGE_RECEIPTS_COLLECTION).document(messageId).set(
+            mapOf(
+                "messageId" to messageId,
+                "from" to senderId,
+                "to" to localId,
+                "receivedAt" to System.currentTimeMillis()
+            )
+        ).addOnFailureListener { error ->
+            updateDebugStatus("receipt failed: ${error.message}")
+        }
+    }
+
+    private fun pollMessageReceipts() {
+        val firestore = db ?: return
+        firestore.collection(MESSAGE_RECEIPTS_COLLECTION)
+            .whereEqualTo("from", localId)
+            .get()
+            .addOnSuccessListener { snap ->
+                snap.documents.forEach { doc ->
+                    val messageId = doc.getString("messageId") ?: doc.id
+                    val targetId = doc.getString("to") ?: return@forEach
+                    updateOutgoingMessageStatus(targetId, messageId, MESSAGE_STATUS_RECEIVED)
+                    removePendingTextMessage(messageId)
+                }
+            }
+            .addOnFailureListener { error ->
+                updateDebugStatus("receipt poll failed: ${error.message}")
+            }
+    }
+
+    private fun savePendingTextMessage(message: PendingTextMessage) {
+        synchronized(pendingMessages) {
+            pendingMessages[message.id] = message
+            persistPendingTextMessagesLocked()
+        }
+    }
+
+    private fun removePendingTextMessage(id: String) {
+        synchronized(pendingMessages) {
+            pendingMessages.remove(id)
+            persistPendingTextMessagesLocked()
+        }
+    }
+
+    private fun loadPendingTextMessages() {
+        val rows = prefs.getStringSet(KEY_PENDING_TEXT_MESSAGES, emptySet()).orEmpty()
+        synchronized(pendingMessages) {
+            pendingMessages.clear()
+            rows.mapNotNull { PendingTextMessage.decode(it) }.forEach { pendingMessages[it.id] = it }
+        }
+    }
+
+    private fun persistPendingTextMessagesLocked() {
+        prefs.edit()
+            .putStringSet(KEY_PENDING_TEXT_MESSAGES, pendingMessages.values.map { it.encode() }.toSet())
+            .apply()
+    }
+
+    private fun attemptSendPendingCloudMessages() {
+        val ids = synchronized(pendingMessages) { pendingMessages.keys.toList() }
+        ids.forEach { sendPendingCloudMessage(it) }
+    }
+
+    private fun sendPendingCloudMessage(id: String) {
+        val pending = synchronized(pendingMessages) { pendingMessages[id] } ?: return
+        synchronized(sendingCloudMessages) {
+            if (!sendingCloudMessages.add(id)) return
+        }
+
+        val firestore = db
+        if (firestore == null) {
+            synchronized(sendingCloudMessages) { sendingCloudMessages.remove(id) }
+            return
+        }
+
+        firestore.collection("users").document(pending.targetId).get()
+            .addOnSuccessListener { userDoc ->
+                val publicKeyB64 = userDoc.getString("messagePublicKey")
+                if (publicKeyB64.isNullOrBlank()) {
+                    synchronized(sendingCloudMessages) { sendingCloudMessages.remove(id) }
+                    runOnUiThread {
+                        binding.status.text = "Contact encryption key not found"
+                        binding.chatStatus.text = "Contact encryption key not found"
+                    }
+                    return@addOnSuccessListener
+                }
+
+                val encrypted = runCatching { encryptMessageFor(pending.text, publicKeyB64) }
+                    .getOrElse { error ->
+                        synchronized(sendingCloudMessages) { sendingCloudMessages.remove(id) }
+                        runOnUiThread {
+                            binding.status.text = "Encrypt failed: ${error.message}"
+                            binding.chatStatus.text = "Encrypt failed: ${error.message}"
+                        }
+                        return@addOnSuccessListener
+                    }
+
+                val message = mapOf(
+                    "from" to localId,
+                    "to" to pending.targetId,
+                    "encryptedKey" to encrypted.encryptedKey,
+                    "iv" to encrypted.iv,
+                    "cipherText" to encrypted.cipherText,
+                    "messageAlgorithm" to AES_MESSAGE_ALGORITHM,
+                    "keyAlgorithm" to encrypted.keyAlgorithm,
+                    "createdAt" to pending.createdAt
+                )
+
+                firestore.collection("messages").document(id).set(message)
+                    .addOnSuccessListener {
+                        synchronized(sendingCloudMessages) { sendingCloudMessages.remove(id) }
+                        updateOutgoingMessageStatus(pending.targetId, id, MESSAGE_STATUS_SENT)
+                        runOnUiThread {
+                            binding.status.text = "Message sent"
+                            binding.chatStatus.text = "Message sent"
+                        }
+                    }
+                    .addOnFailureListener { error ->
+                        synchronized(sendingCloudMessages) { sendingCloudMessages.remove(id) }
+                        runOnUiThread { binding.status.text = "Message waits for connection" }
+                        updateDebugStatus("send pending failed: ${error.message}")
+                    }
+            }
+            .addOnFailureListener { error ->
+                synchronized(sendingCloudMessages) { sendingCloudMessages.remove(id) }
+                runOnUiThread { binding.status.text = "Message waits for connection" }
+                updateDebugStatus("key fetch failed: ${error.message}")
+            }
+    }
+
+    private fun appendOutgoingMessage(chatId: String, id: String, text: String, status: String) {
+        saveOutgoingMessageText(id, chatId, text)
+        appendMessage(chatId, "Me", "$text [$status]")
+    }
+
+    private fun updateOutgoingMessageStatus(chatId: String, id: String, status: String) {
+        val text = prefs.getString(outgoingTextKey(id), null) ?: synchronized(pendingMessages) {
+            pendingMessages[id]?.text
+        } ?: return
+        val update = {
+            val log = messageLogFor(chatId)
+            val oldWaiting = "Me: $text [$MESSAGE_STATUS_WAITING]"
+            val oldSent = "Me: $text [$MESSAGE_STATUS_SENT]"
+            val newLine = "Me: $text [$status]"
+            val current = log.toString()
+            val replaced = when {
+                current.contains(oldWaiting) -> current.replace(oldWaiting, newLine)
+                current.contains(oldSent) -> current.replace(oldSent, newLine)
+                else -> current
+            }
+            if (replaced != current) {
+                messageLogs[chatId] = StringBuilder(replaced)
+                prefs.edit().putString(chatLogKey(chatId), replaced).apply()
+                renderMessages(chatId)
+            }
+        }
+        if (Thread.currentThread() == mainLooper.thread) update() else runOnUiThread(update)
+    }
+
+    private fun saveOutgoingMessageText(id: String, chatId: String, text: String) {
+        prefs.edit()
+            .putString(outgoingTextKey(id), text)
+            .putString(outgoingChatKey(id), chatId)
+            .apply()
+    }
+
+    private fun renderMessages(chatId: String) {
+        if (binding.chatScreen.visibility == View.VISIBLE && chatId == remoteId) {
+            binding.messages.text = messageLogFor(chatId).toString()
+        }
+    }
+
+    private fun chooseDirectPhoto() {
+        if (remoteId.isBlank()) {
+            binding.status.text = "Choose contact"
+            return
+        }
+        directPhotoPicker.launch("image/*")
+    }
+
+    private fun queueDirectPhoto(uri: Uri) {
+        val targetId = selectedContactId()
+        if (targetId.isBlank()) {
+            binding.status.text = "Choose contact"
+            return
+        }
+        val id = nextMessageId()
+        pendingDirectPhoto = PendingDirectPhoto(id, targetId, uri)
+        appendOutgoingMessage(targetId, id, "[Photo]", MESSAGE_STATUS_WAITING)
+        flushPendingDirectPhoto()
+    }
+
+    private fun flushPendingDirectPhoto() {
+        val pending = pendingDirectPhoto ?: return
+        if (pending.targetId != remoteId) return
+        if (messageChannel?.state() != DataChannel.State.OPEN) {
+            runOnUiThread { binding.status.text = "Photo waits for direct connection" }
+            return
+        }
+        ioScope.launch {
+            val sent = directPhotoTransfer.sendPhoto(pending.id, pending.uri)
+            runOnUiThread {
+                if (sent) {
+                    updateOutgoingMessageStatus(pending.targetId, pending.id, MESSAGE_STATUS_SENT)
+                    binding.status.text = "Photo sent directly"
+                    pendingDirectPhoto = null
+                } else {
+                    binding.status.text = "Photo waits for direct connection"
+                }
+            }
+        }
+    }
+
     private fun b64(bytes: ByteArray): String =
         Base64.encodeToString(bytes, Base64.NO_WRAP)
 
@@ -1576,23 +1780,19 @@ class MainActivity : AppCompatActivity() {
         }
 
         val id = nextMessageId()
-        synchronized(pendingMessages) {
-            pendingMessages[id] = text
-        }
         sendTextPacket(id, text)
         retryUntilAck(id)
         binding.messageInput.text?.clear()
-        appendMessage(remoteId, "Me", text)
+        appendOutgoingMessage(remoteId, id, text, MESSAGE_STATUS_SENT)
     }
 
     private fun handleMessagePacket(packet: String) {
+        if (directPhotoTransfer.handlePacket(packet)) return
         val parts = packet.split("|", limit = 3)
         when (parts.firstOrNull()) {
             "ACK" -> {
                 val id = parts.getOrNull(1) ?: return
-                synchronized(pendingMessages) {
-                    pendingMessages.remove(id)
-                }
+                updateOutgoingMessageStatus(remoteId, id, MESSAGE_STATUS_RECEIVED)
             }
             "TXT" -> {
                 val id = parts.getOrNull(1) ?: return
@@ -1634,7 +1834,7 @@ class MainActivity : AppCompatActivity() {
             repeat(TEXT_RETRY_COUNT) {
                 delay(TEXT_RETRY_DELAY_MS)
                 val text = synchronized(pendingMessages) {
-                    pendingMessages[id]
+                    pendingMessages[id]?.text
                 } ?: return@launch
                 sendTextPacket(id, text)
             }
@@ -2207,9 +2407,6 @@ class MainActivity : AppCompatActivity() {
         synchronized(voiceJitterBuffer) {
             voiceJitterBuffer.clear()
         }
-        synchronized(pendingMessages) {
-            pendingMessages.clear()
-        }
         synchronized(processedCandidateIds) {
             processedCandidateIds.clear()
         }
@@ -2261,6 +2458,8 @@ class MainActivity : AppCompatActivity() {
         incomingListener = null
         messagePollJob?.cancel()
         messagePollJob = null
+        receiptPollJob?.cancel()
+        receiptPollJob = null
         cancelCallTimeout()
         ioScope.cancel()
         releaseSharedCodec()
@@ -2277,6 +2476,7 @@ class MainActivity : AppCompatActivity() {
         private const val TEXT_RETRY_COUNT = 6
         private const val TEXT_RETRY_DELAY_MS = 2_000L
         private const val MESSAGE_POLL_MS = 5_000L
+        private const val RECEIPT_POLL_MS = 3_000L
         private const val CALL_SETUP_TIMEOUT_SECONDS = 30
         private const val VOICE_HEADER_BYTES = 4
         private const val START_JITTER_FRAMES = 3
@@ -2305,9 +2505,16 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_CONTACT_IDS = "contact_ids"
         private const val KEY_CONTACT_PREFIX = "contact_name_"
         private const val KEY_CHAT_LOG_PREFIX = "chat_log_"
+        private const val KEY_OUTGOING_TEXT_PREFIX = "outgoing_text_"
+        private const val KEY_OUTGOING_CHAT_PREFIX = "outgoing_chat_"
+        private const val KEY_PENDING_TEXT_MESSAGES = "pending_text_messages"
         private const val KEY_SEEN_MESSAGE_IDS = "seen_message_ids"
         private const val KEY_FCM_TOKEN = "fcm_token"
         private const val KEY_UNREAD_NOTIFICATION_COUNT = "unread_notification_count"
+        private const val MESSAGE_RECEIPTS_COLLECTION = "messageReceipts"
+        private const val MESSAGE_STATUS_WAITING = "ждёт отправки"
+        private const val MESSAGE_STATUS_SENT = "отправлено"
+        private const val MESSAGE_STATUS_RECEIVED = "получено"
         private const val PHOTO_ACCOUNTS_COLLECTION = "photoAccounts"
         private const val PHOTO_ACCOUNT_SALT = "x-link-photo-account-v1"
         private const val NOTIFICATION_CALLS_CHANNEL_ID = "xxxlink_calls_v3"
@@ -2329,6 +2536,36 @@ class MainActivity : AppCompatActivity() {
                 else -> RAW_PCM_SAMPLES_PER_FRAME * 2
             }
     }
+
+    private data class PendingTextMessage(
+        val id: String,
+        val targetId: String,
+        val text: String,
+        val createdAt: Long
+    ) {
+        fun encode(): String {
+            val textB64 = Base64.encodeToString(text.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+            return listOf(id, targetId, createdAt.toString(), textB64).joinToString("|")
+        }
+
+        companion object {
+            fun decode(value: String): PendingTextMessage? {
+                val parts = value.split("|", limit = 4)
+                if (parts.size != 4) return null
+                val createdAt = parts[2].toLongOrNull() ?: return null
+                val text = runCatching {
+                    String(Base64.decode(parts[3], Base64.NO_WRAP), Charsets.UTF_8)
+                }.getOrNull() ?: return null
+                return PendingTextMessage(parts[0], parts[1], text, createdAt)
+            }
+        }
+    }
+
+    private data class PendingDirectPhoto(
+        val id: String,
+        val targetId: String,
+        val uri: Uri
+    )
 
     private enum class VoiceMode(
         val label: String,

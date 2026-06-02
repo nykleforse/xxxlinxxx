@@ -88,6 +88,24 @@ service cloud.firestore {
       allow delete: if resource.data.keys().hasAll(['to']) && isShortId(resource.data.to);
     }
 
+    match /messageReceipts/{messageId} {
+      allow get, list: if true;
+
+      allow create, update: if request.resource.data.keys().hasOnly([
+          'messageId',
+          'from',
+          'to',
+          'receivedAt'
+        ]) &&
+        request.resource.data.messageId == messageId &&
+        isShortId(request.resource.data.from) &&
+        isShortId(request.resource.data.to) &&
+        request.resource.data.from != request.resource.data.to &&
+        isClientMillis(request.resource.data.receivedAt);
+
+      allow delete: if false;
+    }
+
     match /calls/{callId} {
       allow get, list: if true;
 

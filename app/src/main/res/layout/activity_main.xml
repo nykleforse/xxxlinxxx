@@ -347,6 +347,16 @@
             android:layout_marginTop="8dp"
             android:orientation="horizontal">
 
+            <ImageButton
+                android:id="@+id/btnSendPhoto"
+                android:layout_width="48dp"
+                android:layout_height="match_parent"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="Send photo"
+                android:padding="12dp"
+                android:scaleType="center"
+                android:src="@drawable/ic_photo_24" />
+
             <EditText
                 android:id="@+id/messageInput"
                 android:layout_width="0dp"

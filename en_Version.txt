@@ -1,0 +1,76 @@
+Version 1.06.05.26
+
+What the messenger can do now:
+
+- Photo-based account creation and restoration.
+- Local user ID generation and copying.
+- Local contact list with custom contact names.
+- One-to-one chat screen for saved contacts.
+- Encrypted text messaging through Firestore.
+- RSA key pair generation for message encryption.
+- AES/GCM encryption for message content.
+- Firestore delivery fallback for text messages.
+- Message delivery status: one check mark for sent messages.
+- Message read status: two check marks after the recipient processes the message.
+- Per-chat unread message counters in the contact list.
+- System message notifications with sound and vibration.
+- Incoming call notifications with full-screen intent support.
+- Firebase Cloud Messaging token registration.
+- Firebase Functions for message and call push notifications.
+- Firestore rules for users, messages, receipts, calls, candidates, and photo accounts.
+- WebRTC call signaling through Firestore.
+- STUN/TURN server configuration for peer connection setup.
+- Voice calls through WebRTC.
+- Voice modes: comfy, base, and Xtream.
+- Native Codec2 bridge for low-bandwidth voice modes.
+- Microphone mute during calls.
+- Speaker/phone audio route toggle during calls.
+- Active call screen with call timer.
+- Incoming, outgoing, and active call screens.
+- Call decline, cancel, disconnect, and timeout handling.
+- P2P DataChannel messaging while a peer connection is open.
+- Direct phone-to-phone photo transfer through WebRTC DataChannel.
+- Chunked direct photo transfer without storing the photo on Firebase.
+- Local saving of received direct photos in app-specific pictures storage.
+- Local chat history stored on the device.
+- Agent workflow files for project coordination.
+- Liaison, Director, Overseer, Android UI, Firebase, WebRTC P2P, Security & Privacy, and Build & Regression agent definitions.
+
+Version 1.11.05.26
+
+New features:
+
+- *Logout button for returning from the current photo account to photo login.*
+- *More reliable photo login based on a visual photo fingerprint instead of only raw file bytes.*
+- *Compatibility check for photo accounts created with the earlier raw-photo login method.*
+- *Safer photo reading during login to reduce crashes or app minimization after choosing a large image.*
+- *Android build version increased so the new APK can update the previous installed build.*
+
+Version v1.12
+
+New features:
+
+- *Stable APK signing for both debug and release builds.*
+- *Signed release APK support for cleaner installation and updates.*
+- *Project synchronized with the latest GitHub beta release tag `v1.12`.*
+- *Android `versionName` aligned with GitHub release naming: `1.12-beta`.*
+- *Android `versionCode` increased to `12` for installing the signed beta update over previous builds.*
+- *Outgoing messages now have three visible states: waiting to send, sent, and received.*
+- *Text messages stay queued and retry automatically when the network or VPN is unstable.*
+- *Direct phone-to-phone photo transfer through WebRTC DataChannel was restored without storing photos on Firebase.*
+
+Next versions:
+
+- Add a new version chapter below this one.
+- Put the base capabilities first.
+- For each later version, list only the new functions and mark new items in italics.
+- Always update `en_Version.txt` and `rus_Version.txt` together.
+- Do not edit old version chapters except for typo fixes.
+
+Later version template:
+
+Version v1.13
+
+New features:
+
+- *New feature.*

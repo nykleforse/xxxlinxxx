@@ -11,13 +11,14 @@ android {
     namespace = "com.example.xxxlinkxxx"
     compileSdk = 34
     ndkVersion = "26.1.10909125"
+    val projectDebugKeystore = file("signing/debug.keystore")
 
     defaultConfig {
         applicationId = "com.example.xxxlinkxxx"
         minSdk = 21
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 12
+        versionName = "1.12-beta"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -28,9 +29,23 @@ android {
 
     }
 
+    signingConfigs {
+        getByName("debug") {
+            if (projectDebugKeystore.exists()) {
+                storeFile = projectDebugKeystore
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
+        }
+    }
+
     buildTypes {
         getByName("release") {
             isMinifyEnabled = false
+            if (projectDebugKeystore.exists()) {
+                signingConfig = signingConfigs.getByName("debug")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -38,6 +53,9 @@ android {
         }
         getByName("debug") {
             isMinifyEnabled = false
+            if (projectDebugKeystore.exists()) {
+                signingConfig = signingConfigs.getByName("debug")
+            }
         }
     }
 
