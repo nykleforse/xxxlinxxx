@@ -444,7 +444,6 @@
                     android:layout_weight="1"
                     android:backgroundTint="@color/line"
                     android:hint="Message"
-                    android:imeOptions="actionSend"
                     android:inputType="textCapSentences|textMultiLine"
                     android:maxLines="2"
                     android:textColor="@color/text_primary"
