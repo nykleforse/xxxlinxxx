@@ -19,3 +19,10 @@ node_modules/
 functions/node_modules/
 firebase-debug.log
 firebase-debug.*.log
+# uiautomator window dumps
+*_window_*.xml
+# Android Studio
+.idea/
+*.iml
+captures/
+.kotlin/

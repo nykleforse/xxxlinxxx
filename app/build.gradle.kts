@@ -23,23 +23,35 @@ android {
         applicationId = "com.example.xxxlinkxxx"
         minSdk = 21
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 13
+        versionName = "1.12"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
         }
 
-        // Разрешения для работы с аудио
-        manifestPlaceholders["usesCleartextTraffic"] = true
-
+        // TURN creds baked from local.properties. WARNING: visible to anyone
+        // who decompiles the APK — replace with short-lived backend-issued
+        // creds before production release.
         buildConfigField("String", "TURN_USERNAME", "\"${localProps.getProperty("turn.username", "")}\"")
         buildConfigField("String", "TURN_PASSWORD", "\"${localProps.getProperty("turn.password", "")}\"")
+    }
+
+    signingConfigs {
+        // Re-use the standard debug keystore for all builds so release APKs install directly.
+        // Replace with a real keystore before publishing to Play Store.
+        getByName("debug") {
+            storeFile = file("${System.getProperty("user.home")}/.android/debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
     }
 
     buildTypes {
         getByName("release") {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("debug")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -47,6 +59,7 @@ android {
         }
         getByName("debug") {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 
@@ -88,8 +101,21 @@ dependencies {
     // ===== Kotlin stdlib =====
     implementation("org.jetbrains.kotlin:kotlin-stdlib:1.9.23")
 
+    // ===== WorkManager =====
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
+
+    // ===== QR (generation + scanning) =====
+    implementation("com.google.zxing:core:3.5.3")
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0") { isTransitive = false }
+
     // ===== AndroidX UI =====
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
+
+    // ===== Biometric =====
+    implementation("androidx.biometric:biometric:1.1.0")
+
+    // ===== Encrypted SharedPreferences (Keystore-wrapped master key) =====
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
 }

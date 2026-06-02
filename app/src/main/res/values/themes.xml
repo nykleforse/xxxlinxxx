@@ -1,14 +1,4 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <style name="Base.Theme.Xxxlinkxxxclaude" parent="Theme.Material3.DayNight.NoActionBar">
-        <item name="android:fontFamily">sans</item>
-        <item name="android:windowBackground">@color/oled_black</item>
-        <item name="android:navigationBarColor">@color/oled_black</item>
-        <item name="android:statusBarColor">@color/oled_black</item>
-        <item name="android:windowLightStatusBar">false</item>
-        <item name="android:colorAccent">@color/text_secondary</item>
-        <item name="colorPrimary">@color/text_secondary</item>
-        <item name="colorSecondary">@color/text_secondary</item>
-    </style>
-
-    <style name="Theme.Xxxlinkxxxclaude" parent="Base.Theme.Xxxlinkxxxclaude" />
+    <!-- Unused — manifest uses Theme.AppCompat.Light.NoActionBar directly.
+         Kept as empty resource file so values-night/themes.xml retains a parent. -->
 </resources>

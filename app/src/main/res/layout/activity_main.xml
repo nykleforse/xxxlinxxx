@@ -1,57 +1,794 @@
 <?xml version="1.0" encoding="utf-8"?>
-<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<androidx.drawerlayout.widget.DrawerLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools"
-    android:id="@+id/main"
+    android:id="@+id/drawerLayout"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@color/oled_black"
-    android:padding="16dp"
     tools:context=".MainActivity">
 
-    <LinearLayout
-        android:id="@+id/photoAuthScreen"
+    <!-- ═══════════════════════════  MAIN CONTENT  ═══════════════════════════ -->
+    <FrameLayout
+        android:id="@+id/main"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:gravity="center_vertical"
-        android:orientation="vertical">
+        android:padding="16dp">
 
-        <TextView
+        <!-- PHOTO AUTH -->
+        <LinearLayout
+            android:id="@+id/photoAuthScreen"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="X-link"
-            android:textColor="@color/text_primary"
-            android:textSize="28sp"
-            android:textStyle="bold" />
+            android:layout_height="match_parent"
+            android:gravity="center_vertical"
+            android:orientation="vertical">
 
-        <TextView
-            android:id="@+id/photoAuthStatus"
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="X-link"
+                android:textColor="@color/text_primary"
+                android:textSize="28sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/photoAuthStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:text="Select your account photo"
+                android:textColor="@color/text_secondary"
+                android:textSize="14sp" />
+
+            <Button
+                android:id="@+id/btnChooseAuthPhoto"
+                android:layout_width="match_parent"
+                android:layout_height="52dp"
+                android:layout_marginTop="22dp"
+                android:backgroundTint="@color/control"
+                android:text="Choose photo"
+                android:textColor="@color/text_primary" />
+        </LinearLayout>
+
+        <!-- CONTACT LIST -->
+        <LinearLayout
+            android:id="@+id/contactListScreen"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="10dp"
-            android:text="Select your account photo"
-            android:textColor="@color/text_secondary"
-            android:textSize="14sp" />
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:visibility="gone">
 
-        <Button
-            android:id="@+id/btnChooseAuthPhoto"
+            <!-- Header: hamburger + title -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btnMenu"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:gravity="center"
+                    android:includeFontPadding="false"
+                    android:minWidth="0dp"
+                    android:minHeight="0dp"
+                    android:padding="0dp"
+                    android:text="&#9776;"
+                    android:textColor="@color/text_primary"
+                    android:textSize="22sp" />
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:layout_weight="1"
+                    android:text="Chats"
+                    android:textColor="@color/text_primary"
+                    android:textSize="20sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/tvUnreadCount"
+                    android:layout_width="wrap_content"
+                    android:layout_height="22dp"
+                    android:minWidth="22dp"
+                    android:gravity="center"
+                    android:paddingStart="6dp"
+                    android:paddingEnd="6dp"
+                    android:layout_marginEnd="4dp"
+                    android:background="@drawable/bg_badge"
+                    android:textColor="@color/oled_black"
+                    android:textSize="12sp"
+                    android:textStyle="bold"
+                    android:visibility="gone" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/status"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="Disconnected"
+                android:textColor="@color/text_secondary"
+                android:textSize="13sp"
+                android:visibility="gone" />
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:layout_marginTop="8dp"
+                android:background="@color/line" />
+
+            <ScrollView
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_marginTop="8dp"
+                android:layout_weight="1"
+                android:fillViewport="true">
+
+                <LinearLayout
+                    android:id="@+id/contactsList"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical" />
+            </ScrollView>
+
+            <Button
+                android:id="@+id/btnOpenAddContact"
+                android:layout_width="56dp"
+                android:layout_height="56dp"
+                android:layout_marginBottom="8dp"
+                android:background="@drawable/bg_add_contact_fab"
+                android:gravity="center"
+                android:includeFontPadding="false"
+                android:minWidth="0dp"
+                android:minHeight="0dp"
+                android:padding="0dp"
+                android:text="+"
+                android:textColor="@color/text_secondary"
+                android:textSize="28sp" />
+        </LinearLayout>
+
+        <!-- ADD CONTACT -->
+        <LinearLayout
+            android:id="@+id/addContactScreen"
             android:layout_width="match_parent"
-            android:layout_height="52dp"
-            android:layout_marginTop="22dp"
-            android:backgroundTint="@color/control"
-            android:text="Choose photo"
-            android:textColor="@color/text_primary" />
-    </LinearLayout>
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:visibility="gone">
 
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btnBackFromAddContact"
+                    android:layout_width="72dp"
+                    android:layout_height="match_parent"
+                    android:backgroundTint="@color/control"
+                    android:text="Back"
+                    android:textColor="@color/text_primary" />
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_marginStart="8dp"
+                    android:layout_weight="1"
+                    android:gravity="center_vertical"
+                    android:text="New chat"
+                    android:textColor="@color/text_primary"
+                    android:textSize="18sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <EditText
+                android:id="@+id/addContactIdInput"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:layout_marginTop="24dp"
+                android:backgroundTint="@color/line"
+                android:hint="Contact ID"
+                android:imeOptions="actionNext"
+                android:inputType="textNoSuggestions|textCapCharacters"
+                android:singleLine="true"
+                android:textColor="@color/text_primary"
+                android:textColorHint="@color/text_muted" />
+
+            <EditText
+                android:id="@+id/addContactNameInput"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:layout_marginTop="8dp"
+                android:backgroundTint="@color/line"
+                android:hint="Local name"
+                android:imeOptions="actionDone"
+                android:inputType="textCapWords"
+                android:singleLine="true"
+                android:textColor="@color/text_primary"
+                android:textColorHint="@color/text_muted" />
+
+            <Button
+                android:id="@+id/btnAddContact"
+                android:layout_width="match_parent"
+                android:layout_height="52dp"
+                android:layout_marginTop="16dp"
+                android:backgroundTint="@color/control"
+                android:text="Add"
+                android:textColor="@color/text_primary" />
+        </LinearLayout>
+
+        <!-- CHAT -->
+        <LinearLayout
+            android:id="@+id/chatScreen"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btnBack"
+                    android:layout_width="72dp"
+                    android:layout_height="match_parent"
+                    android:backgroundTint="@color/control"
+                    android:text="Back"
+                    android:textColor="@color/text_primary" />
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_marginStart="8dp"
+                    android:layout_weight="1"
+                    android:gravity="center_vertical"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:id="@+id/chatTitle"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:singleLine="true"
+                        android:textColor="@color/text_primary"
+                        android:textSize="16sp"
+                        android:textStyle="bold"
+                        tools:text="Alex" />
+
+                    <TextView
+                        android:id="@+id/chatPeerId"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:singleLine="true"
+                        android:textColor="@color/text_muted"
+                        android:textSize="12sp"
+                        android:visibility="gone"
+                        tools:text="4C024A76" />
+                </LinearLayout>
+
+                <Button
+                    android:id="@+id/btnSearch"
+                    android:layout_width="44dp"
+                    android:layout_height="match_parent"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:minWidth="0dp"
+                    android:minHeight="0dp"
+                    android:padding="0dp"
+                    android:text="&#128269;"
+                    android:textColor="@color/text_primary"
+                    android:textSize="18sp" />
+
+                <ImageButton
+                    android:id="@+id/btnCall"
+                    android:layout_width="48dp"
+                    android:layout_height="match_parent"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:contentDescription="Call"
+                    android:padding="12dp"
+                    android:scaleType="center"
+                    android:src="@drawable/ic_phone_24" />
+            </LinearLayout>
+
+            <!-- Banner: unsaved contact → quick add -->
+            <LinearLayout
+                android:id="@+id/addContactBanner"
+                android:layout_width="match_parent"
+                android:layout_height="36dp"
+                android:layout_marginTop="6dp"
+                android:background="@color/control"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingStart="12dp"
+                android:paddingEnd="4dp"
+                android:visibility="gone">
+
+                <TextView
+                    android:id="@+id/bannerContactId"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:singleLine="true"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="12sp" />
+
+                <Button
+                    android:id="@+id/btnBannerAddContact"
+                    android:layout_width="wrap_content"
+                    android:layout_height="28dp"
+                    android:backgroundTint="@color/oled_black"
+                    android:minWidth="0dp"
+                    android:minHeight="0dp"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="12dp"
+                    android:text="+ Add"
+                    android:textColor="@color/text_primary"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/callControls"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:layout_marginTop="8dp"
+                android:orientation="horizontal"
+                android:visibility="gone">
+
+                <Button
+                    android:id="@+id/btnAccept"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:backgroundTint="@color/control"
+                    android:text="Accept"
+                    android:textColor="@color/text_primary" />
+
+                <Button
+                    android:id="@+id/btnDisconnect"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_marginStart="8dp"
+                    android:layout_weight="1"
+                    android:backgroundTint="@color/control"
+                    android:text="End"
+                    android:textColor="@color/text_primary" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/chatStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp"
+                android:visibility="gone"
+                tools:text="CONNECTED" />
+
+            <!-- Search bar (hidden by default) -->
+            <LinearLayout
+                android:id="@+id/chatSearchBar"
+                android:layout_width="match_parent"
+                android:layout_height="44dp"
+                android:layout_marginTop="6dp"
+                android:orientation="horizontal"
+                android:visibility="gone">
+
+                <EditText
+                    android:id="@+id/chatSearchInput"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:backgroundTint="@color/line"
+                    android:hint="Search messages..."
+                    android:inputType="text"
+                    android:singleLine="true"
+                    android:textColor="@color/text_primary"
+                    android:textColorHint="@color/text_muted" />
+
+                <Button
+                    android:id="@+id/btnClearSearch"
+                    android:layout_width="44dp"
+                    android:layout_height="match_parent"
+                    android:layout_marginStart="6dp"
+                    android:backgroundTint="@color/control"
+                    android:minWidth="0dp"
+                    android:minHeight="0dp"
+                    android:padding="0dp"
+                    android:text="&#10005;"
+                    android:textColor="@color/text_primary" />
+            </LinearLayout>
+
+            <ScrollView
+                android:id="@+id/messagesScroll"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_marginTop="12dp"
+                android:layout_weight="1"
+                android:fillViewport="true"
+                android:scrollbars="vertical">
+
+                <LinearLayout
+                    android:id="@+id/messagesContainer"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:paddingBottom="8dp"/>
+            </ScrollView>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:layout_marginTop="8dp"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btnAttachPhoto"
+                    android:layout_width="44dp"
+                    android:layout_height="match_parent"
+                    android:layout_marginEnd="6dp"
+                    android:backgroundTint="@color/control"
+                    android:minWidth="0dp"
+                    android:minHeight="0dp"
+                    android:padding="0dp"
+                    android:text="📎"
+                    android:textSize="18sp"
+                    android:textColor="@color/text_primary" />
+
+                <EditText
+                    android:id="@+id/messageInput"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:backgroundTint="@color/line"
+                    android:hint="Message"
+                    android:imeOptions="actionSend"
+                    android:inputType="textCapSentences|textMultiLine"
+                    android:maxLines="2"
+                    android:textColor="@color/text_primary"
+                    android:textColorHint="@color/text_muted" />
+
+                <Button
+                    android:id="@+id/btnSend"
+                    android:layout_width="52dp"
+                    android:layout_height="match_parent"
+                    android:layout_marginStart="8dp"
+                    android:backgroundTint="@color/control"
+                    android:minWidth="0dp"
+                    android:minHeight="0dp"
+                    android:padding="0dp"
+                    android:text="^"
+                    android:textColor="@color/text_primary"
+                    android:textSize="20sp" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- INCOMING CALL -->
+        <LinearLayout
+            android:id="@+id/incomingCallScreen"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="@color/oled_black"
+            android:gravity="center"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center"
+                android:text="Incoming call"
+                android:textColor="@color/text_secondary"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/incomingCallerName"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:gravity="center"
+                android:textColor="@color/text_primary"
+                android:textSize="28sp"
+                android:textStyle="bold"
+                tools:text="Alex" />
+
+            <TextView
+                android:id="@+id/incomingCallerId"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:gravity="center"
+                android:textColor="@color/text_muted"
+                android:textSize="13sp"
+                tools:text="4C024A76" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="56dp"
+                android:layout_marginTop="36dp"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btnDeclineIncoming"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:backgroundTint="@color/control"
+                    android:text="Decline"
+                    android:textColor="@color/text_primary" />
+
+                <Button
+                    android:id="@+id/btnAcceptIncoming"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_marginStart="12dp"
+                    android:layout_weight="1"
+                    android:backgroundTint="@color/control"
+                    android:text="Accept"
+                    android:textColor="@color/text_primary" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- OUTGOING CALL -->
+        <LinearLayout
+            android:id="@+id/outgoingCallScreen"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="@color/oled_black"
+            android:gravity="center"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center"
+                android:text="Calling"
+                android:textColor="@color/text_secondary"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/outgoingCallName"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:gravity="center"
+                android:textColor="@color/text_primary"
+                android:textSize="28sp"
+                android:textStyle="bold"
+                tools:text="Alex" />
+
+            <TextView
+                android:id="@+id/outgoingCallCountdown"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="24dp"
+                android:gravity="center"
+                android:text="30"
+                android:textColor="@color/text_primary"
+                android:textSize="54sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center"
+                android:text="seconds"
+                android:textColor="@color/text_muted"
+                android:textSize="13sp" />
+
+            <Button
+                android:id="@+id/btnCancelOutgoingCall"
+                android:layout_width="match_parent"
+                android:layout_height="56dp"
+                android:layout_marginTop="42dp"
+                android:backgroundTint="@color/control"
+                android:text="Cancel"
+                android:textColor="@color/text_primary" />
+        </LinearLayout>
+
+        <!-- ACTIVE CALL -->
+        <LinearLayout
+            android:id="@+id/activeCallScreen"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="@color/oled_black"
+            android:gravity="center_horizontal"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <TextView
+                android:id="@+id/callTimer"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="48dp"
+                android:gravity="center"
+                android:text="00:00"
+                android:textColor="@color/text_primary"
+                android:textSize="42sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/activeCallName"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:gravity="center"
+                android:textColor="@color/text_primary"
+                android:textSize="22sp"
+                android:textStyle="bold"
+                tools:text="Alex" />
+
+            <TextView
+                android:id="@+id/activeCallStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:gravity="center"
+                android:text="Connecting"
+                android:textColor="@color/text_secondary"
+                android:textSize="14sp" />
+
+            <Space
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="96dp"
+                android:layout_marginBottom="36dp"
+                android:gravity="center"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btnMuteMic"
+                    android:layout_width="0dp"
+                    android:layout_height="64dp"
+                    android:layout_weight="1"
+                    android:backgroundTint="@color/control"
+                    android:minWidth="0dp"
+                    android:text="Mic"
+                    android:textColor="@color/text_primary" />
+
+                <Button
+                    android:id="@+id/btnToggleSpeaker"
+                    android:layout_width="0dp"
+                    android:layout_height="64dp"
+                    android:layout_marginStart="10dp"
+                    android:layout_weight="1"
+                    android:backgroundTint="@color/control"
+                    android:minWidth="0dp"
+                    android:text="Speaker"
+                    android:textColor="@color/text_primary" />
+
+                <Button
+                    android:id="@+id/btnEndActiveCall"
+                    android:layout_width="0dp"
+                    android:layout_height="64dp"
+                    android:layout_marginStart="10dp"
+                    android:layout_weight="1"
+                    android:backgroundTint="@color/control"
+                    android:minWidth="0dp"
+                    android:text="End"
+                    android:textColor="@color/text_primary" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- PIN LOCK SCREEN (overlay — must be last child so it renders on top) -->
+        <LinearLayout
+            android:id="@+id/lockScreen"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="@color/oled_black"
+            android:gravity="center"
+            android:orientation="vertical"
+            android:padding="32dp"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center"
+                android:text="X-link"
+                android:textColor="@color/text_primary"
+                android:textSize="32sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/lockStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:gravity="center"
+                android:text="Enter PIN to unlock"
+                android:textColor="@color/text_secondary"
+                android:textSize="14sp" />
+
+            <EditText
+                android:id="@+id/pinInput"
+                android:layout_width="180dp"
+                android:layout_height="52dp"
+                android:layout_marginTop="24dp"
+                android:backgroundTint="@color/line"
+                android:gravity="center"
+                android:hint="PIN"
+                android:inputType="numberPassword"
+                android:maxLength="8"
+                android:textColor="@color/text_primary"
+                android:textColorHint="@color/text_muted"
+                android:textSize="20sp" />
+
+            <Button
+                android:id="@+id/btnUnlock"
+                android:layout_width="180dp"
+                android:layout_height="52dp"
+                android:layout_marginTop="16dp"
+                android:backgroundTint="@color/control"
+                android:text="Unlock"
+                android:textColor="@color/text_primary" />
+
+            <Button
+                android:id="@+id/btnUseBiometric"
+                android:layout_width="180dp"
+                android:layout_height="48dp"
+                android:layout_marginTop="12dp"
+                android:backgroundTint="@color/control"
+                android:text="Use biometric"
+                android:textColor="@color/text_primary"
+                android:visibility="gone" />
+        </LinearLayout>
+
+    </FrameLayout>
+
+    <!-- ═══════════════════════════  SIDE DRAWER  ════════════════════════════ -->
     <LinearLayout
-        android:id="@+id/contactListScreen"
-        android:layout_width="match_parent"
+        android:id="@+id/navDrawer"
+        android:layout_width="280dp"
         android:layout_height="match_parent"
+        android:layout_gravity="start"
+        android:background="@color/oled_black"
         android:orientation="vertical"
-        android:visibility="gone">
+        android:padding="16dp">
 
+        <!-- Drawer header -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="48dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="X-link"
+                android:textColor="@color/text_primary"
+                android:textSize="22sp"
+                android:textStyle="bold" />
+
+            <Button
+                android:id="@+id/btnDrawerClose"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:gravity="center"
+                android:includeFontPadding="false"
+                android:minWidth="0dp"
+                android:minHeight="0dp"
+                android:padding="0dp"
+                android:text="&#10005;"
+                android:textColor="@color/text_secondary"
+                android:textSize="18sp" />
+        </LinearLayout>
+
+        <!-- ID row -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginTop="8dp"
             android:gravity="center_vertical"
             android:orientation="horizontal">
 
@@ -62,555 +799,126 @@
                 android:layout_weight="1"
                 android:singleLine="true"
                 android:textColor="@color/text_primary"
-                android:textSize="18sp"
+                android:textSize="15sp"
                 android:textStyle="bold"
                 tools:text="Your ID: 7F31A2C0" />
 
             <ImageButton
                 android:id="@+id/btnCopyMyId"
-                android:layout_width="48dp"
-                android:layout_height="48dp"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
                 android:background="?attr/selectableItemBackgroundBorderless"
                 android:contentDescription="Copy ID"
-                android:padding="12dp"
+                android:padding="10dp"
                 android:scaleType="center"
                 android:src="@drawable/ic_copy_24" />
         </LinearLayout>
 
-        <TextView
-            android:id="@+id/status"
+        <!-- Divider -->
+        <View
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="6dp"
-            android:text="Disconnected"
-            android:textColor="@color/text_secondary"
-            android:textSize="13sp"
-            android:visibility="gone" />
+            android:layout_height="1dp"
+            android:layout_marginTop="8dp"
+            android:layout_marginBottom="12dp"
+            android:background="@color/line" />
 
+        <!-- QR buttons -->
+        <Button
+            android:id="@+id/btnDrawerShowQr"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:backgroundTint="@color/control"
+            android:text="Show my QR"
+            android:textColor="@color/text_primary" />
+
+        <Button
+            android:id="@+id/btnDrawerScanQr"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginTop="8dp"
+            android:backgroundTint="@color/control"
+            android:text="Scan QR code"
+            android:textColor="@color/text_primary" />
+
+        <!-- Divider -->
         <View
             android:layout_width="match_parent"
             android:layout_height="1dp"
             android:layout_marginTop="16dp"
+            android:layout_marginBottom="12dp"
             android:background="@color/line" />
 
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="18dp"
-            android:text="Contacts"
-            android:textColor="@color/text_secondary"
-            android:textSize="13sp" />
-
-        <ScrollView
-            android:layout_width="match_parent"
-            android:layout_height="0dp"
-            android:layout_marginTop="8dp"
-            android:layout_weight="1"
-            android:fillViewport="true">
-
-            <LinearLayout
-                android:id="@+id/contactsList"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical" />
-        </ScrollView>
-
+        <!-- Backup buttons -->
         <Button
-            android:id="@+id/btnOpenAddContact"
-            android:layout_width="56dp"
-            android:layout_height="56dp"
-            android:layout_marginBottom="8dp"
-            android:background="@drawable/bg_add_contact_fab"
-            android:minWidth="0dp"
-            android:minHeight="0dp"
-            android:text="+"
-            android:textColor="@color/text_secondary"
-            android:textSize="28sp" />
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="36dp"
-            android:layout_marginBottom="4dp"
-            android:orientation="horizontal">
-
-            <Button
-                android:id="@+id/btnExportBackup"
-                android:layout_width="0dp"
-                android:layout_height="match_parent"
-                android:layout_weight="1"
-                android:backgroundTint="@color/control"
-                android:minWidth="0dp"
-                android:minHeight="0dp"
-                android:text="Backup"
-                android:textColor="@color/text_secondary"
-                android:textSize="12sp" />
-
-            <Button
-                android:id="@+id/btnImportBackup"
-                android:layout_width="0dp"
-                android:layout_height="match_parent"
-                android:layout_marginStart="8dp"
-                android:layout_weight="1"
-                android:backgroundTint="@color/control"
-                android:minWidth="0dp"
-                android:minHeight="0dp"
-                android:text="Restore"
-                android:textColor="@color/text_secondary"
-                android:textSize="12sp" />
-        </LinearLayout>
-    </LinearLayout>
-
-    <LinearLayout
-        android:id="@+id/addContactScreen"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:orientation="vertical"
-        android:visibility="gone">
-
-        <LinearLayout
+            android:id="@+id/btnExportBackup"
             android:layout_width="match_parent"
             android:layout_height="48dp"
-            android:orientation="horizontal">
-
-            <Button
-                android:id="@+id/btnBackFromAddContact"
-                android:layout_width="72dp"
-                android:layout_height="match_parent"
-                android:backgroundTint="@color/control"
-                android:text="Back"
-                android:textColor="@color/text_primary" />
-
-            <TextView
-                android:layout_width="0dp"
-                android:layout_height="match_parent"
-                android:layout_marginStart="8dp"
-                android:layout_weight="1"
-                android:gravity="center_vertical"
-                android:text="New chat"
-                android:textColor="@color/text_primary"
-                android:textSize="18sp"
-                android:textStyle="bold" />
-        </LinearLayout>
-
-        <EditText
-            android:id="@+id/addContactIdInput"
-            android:layout_width="match_parent"
-            android:layout_height="48dp"
-            android:layout_marginTop="24dp"
-            android:backgroundTint="@color/line"
-            android:hint="Contact ID"
-            android:imeOptions="actionNext"
-            android:inputType="textNoSuggestions|textCapCharacters"
-            android:singleLine="true"
-            android:textColor="@color/text_primary"
-            android:textColorHint="@color/text_muted" />
-
-        <EditText
-            android:id="@+id/addContactNameInput"
-            android:layout_width="match_parent"
-            android:layout_height="48dp"
-            android:layout_marginTop="8dp"
-            android:backgroundTint="@color/line"
-            android:hint="Local name"
-            android:imeOptions="actionDone"
-            android:inputType="textCapWords"
-            android:singleLine="true"
-            android:textColor="@color/text_primary"
-            android:textColorHint="@color/text_muted" />
-
-        <Button
-            android:id="@+id/btnAddContact"
-            android:layout_width="match_parent"
-            android:layout_height="52dp"
-            android:layout_marginTop="16dp"
             android:backgroundTint="@color/control"
-            android:text="Add"
+            android:text="Backup"
             android:textColor="@color/text_primary" />
-    </LinearLayout>
-
-    <LinearLayout
-        android:id="@+id/chatScreen"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:orientation="vertical"
-        android:visibility="gone">
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="48dp"
-            android:orientation="horizontal">
-
-            <Button
-                android:id="@+id/btnBack"
-                android:layout_width="72dp"
-                android:layout_height="match_parent"
-                android:backgroundTint="@color/control"
-                android:text="Back"
-                android:textColor="@color/text_primary" />
-
-            <LinearLayout
-                android:layout_width="0dp"
-                android:layout_height="match_parent"
-                android:layout_marginStart="8dp"
-                android:layout_weight="1"
-                android:gravity="center_vertical"
-                android:orientation="vertical">
-
-                <TextView
-                    android:id="@+id/chatTitle"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:singleLine="true"
-                    android:textColor="@color/text_primary"
-                    android:textSize="16sp"
-                    android:textStyle="bold"
-                    tools:text="Alex" />
-
-                <TextView
-                    android:id="@+id/chatPeerId"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:singleLine="true"
-                    android:textColor="@color/text_muted"
-                    android:textSize="12sp"
-                    android:visibility="gone"
-                    tools:text="4C024A76" />
-            </LinearLayout>
-
-            <ImageButton
-                android:id="@+id/btnCall"
-                android:layout_width="48dp"
-                android:layout_height="match_parent"
-                android:background="?attr/selectableItemBackgroundBorderless"
-                android:contentDescription="Call"
-                android:padding="12dp"
-                android:scaleType="center"
-                android:src="@drawable/ic_phone_24" />
-        </LinearLayout>
-
-        <LinearLayout
-            android:id="@+id/callControls"
-            android:layout_width="match_parent"
-            android:layout_height="48dp"
-            android:layout_marginTop="8dp"
-            android:orientation="horizontal"
-            android:visibility="gone">
-
-            <Button
-                android:id="@+id/btnAccept"
-                android:layout_width="0dp"
-                android:layout_height="match_parent"
-                android:layout_weight="1"
-                android:backgroundTint="@color/control"
-                android:text="Accept"
-                android:textColor="@color/text_primary" />
-
-            <Button
-                android:id="@+id/btnDisconnect"
-                android:layout_width="0dp"
-                android:layout_height="match_parent"
-                android:layout_marginStart="8dp"
-                android:layout_weight="1"
-                android:backgroundTint="@color/control"
-                android:text="End"
-                android:textColor="@color/text_primary" />
-        </LinearLayout>
-
-        <TextView
-            android:id="@+id/chatStatus"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:textColor="@color/text_secondary"
-            android:textSize="12sp"
-            android:visibility="gone"
-            tools:text="CONNECTED" />
-
-        <ScrollView
-            android:id="@+id/messagesScroll"
-            android:layout_width="match_parent"
-            android:layout_height="0dp"
-            android:layout_marginTop="12dp"
-            android:layout_weight="1"
-            android:fillViewport="true"
-            android:scrollbars="vertical">
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical">
-
-                <TextView
-                    android:id="@+id/messages"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text=""
-                    android:textColor="@color/text_primary"
-                    android:textSize="15sp" />
-
-                <View
-                    android:id="@+id/newMessagesDivider"
-                    android:layout_width="match_parent"
-                    android:layout_height="1dp"
-                    android:layout_marginTop="6dp"
-                    android:layout_marginBottom="6dp"
-                    android:alpha="0.45"
-                    android:background="#808080"
-                    android:visibility="gone" />
-
-                <TextView
-                    android:id="@+id/newMessagesText"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text=""
-                    android:textColor="@color/text_primary"
-                    android:textSize="15sp"
-                    android:visibility="gone" />
-
-            </LinearLayout>
-        </ScrollView>
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="48dp"
-            android:layout_marginTop="8dp"
-            android:orientation="horizontal">
-
-            <EditText
-                android:id="@+id/messageInput"
-                android:layout_width="0dp"
-                android:layout_height="match_parent"
-                android:layout_weight="1"
-                android:backgroundTint="@color/line"
-                android:hint="Message"
-                android:imeOptions="actionSend"
-                android:inputType="textCapSentences|textMultiLine"
-                android:maxLines="2"
-                android:textColor="@color/text_primary"
-                android:textColorHint="@color/text_muted" />
-
-            <Button
-                android:id="@+id/btnSend"
-                android:layout_width="52dp"
-                android:layout_height="match_parent"
-                android:layout_marginStart="8dp"
-                android:backgroundTint="@color/control"
-                android:minWidth="0dp"
-                android:minHeight="0dp"
-                android:padding="0dp"
-                android:text="^"
-                android:textColor="@color/text_primary"
-                android:textSize="20sp" />
-        </LinearLayout>
-    </LinearLayout>
-
-    <LinearLayout
-        android:id="@+id/incomingCallScreen"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:background="@color/oled_black"
-        android:gravity="center"
-        android:orientation="vertical"
-        android:visibility="gone">
-
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:gravity="center"
-            android:text="Incoming call"
-            android:textColor="@color/text_secondary"
-            android:textSize="14sp" />
-
-        <TextView
-            android:id="@+id/incomingCallerName"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:gravity="center"
-            android:textColor="@color/text_primary"
-            android:textSize="28sp"
-            android:textStyle="bold"
-            tools:text="Alex" />
-
-        <TextView
-            android:id="@+id/incomingCallerId"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="6dp"
-            android:gravity="center"
-            android:textColor="@color/text_muted"
-            android:textSize="13sp"
-            tools:text="4C024A76" />
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="56dp"
-            android:layout_marginTop="36dp"
-            android:orientation="horizontal">
-
-            <Button
-                android:id="@+id/btnDeclineIncoming"
-                android:layout_width="0dp"
-                android:layout_height="match_parent"
-                android:layout_weight="1"
-                android:backgroundTint="@color/control"
-                android:text="Decline"
-                android:textColor="@color/text_primary" />
-
-            <Button
-                android:id="@+id/btnAcceptIncoming"
-                android:layout_width="0dp"
-                android:layout_height="match_parent"
-                android:layout_marginStart="12dp"
-                android:layout_weight="1"
-                android:backgroundTint="@color/control"
-                android:text="Accept"
-                android:textColor="@color/text_primary" />
-        </LinearLayout>
-    </LinearLayout>
-
-    <LinearLayout
-        android:id="@+id/outgoingCallScreen"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:background="@color/oled_black"
-        android:gravity="center"
-        android:orientation="vertical"
-        android:visibility="gone">
-
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:gravity="center"
-            android:text="Calling"
-            android:textColor="@color/text_secondary"
-            android:textSize="14sp" />
-
-        <TextView
-            android:id="@+id/outgoingCallName"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:gravity="center"
-            android:textColor="@color/text_primary"
-            android:textSize="28sp"
-            android:textStyle="bold"
-            tools:text="Alex" />
-
-        <TextView
-            android:id="@+id/outgoingCallCountdown"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="24dp"
-            android:gravity="center"
-            android:text="30"
-            android:textColor="@color/text_primary"
-            android:textSize="54sp"
-            android:textStyle="bold" />
-
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:gravity="center"
-            android:text="seconds"
-            android:textColor="@color/text_muted"
-            android:textSize="13sp" />
 
         <Button
-            android:id="@+id/btnCancelOutgoingCall"
+            android:id="@+id/btnImportBackup"
             android:layout_width="match_parent"
-            android:layout_height="56dp"
-            android:layout_marginTop="42dp"
+            android:layout_height="48dp"
+            android:layout_marginTop="8dp"
             android:backgroundTint="@color/control"
-            android:text="Cancel"
+            android:text="Restore"
             android:textColor="@color/text_primary" />
-    </LinearLayout>
 
-    <LinearLayout
-        android:id="@+id/activeCallScreen"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:background="@color/oled_black"
-        android:gravity="center_horizontal"
-        android:orientation="vertical"
-        android:visibility="gone">
-
-        <TextView
-            android:id="@+id/callTimer"
+        <!-- Divider -->
+        <View
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="48dp"
-            android:gravity="center"
-            android:text="00:00"
-            android:textColor="@color/text_primary"
-            android:textSize="42sp"
-            android:textStyle="bold" />
-
-        <TextView
-            android:id="@+id/activeCallName"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
+            android:layout_height="1dp"
             android:layout_marginTop="16dp"
-            android:gravity="center"
-            android:textColor="@color/text_primary"
-            android:textSize="22sp"
-            android:textStyle="bold"
-            tools:text="Alex" />
+            android:layout_marginBottom="12dp"
+            android:background="@color/line" />
 
-        <TextView
-            android:id="@+id/activeCallStatus"
+        <!-- Update buttons -->
+        <Button
+            android:id="@+id/btnCheckUpdates"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="6dp"
-            android:gravity="center"
-            android:text="Connecting"
-            android:textColor="@color/text_secondary"
-            android:textSize="14sp" />
+            android:layout_height="48dp"
+            android:backgroundTint="@color/control"
+            android:text="Check for updates"
+            android:textColor="@color/text_primary" />
 
-        <Space
+        <Button
+            android:id="@+id/btnCheckBeta"
             android:layout_width="match_parent"
-            android:layout_height="0dp"
-            android:layout_weight="1" />
+            android:layout_height="48dp"
+            android:layout_marginTop="8dp"
+            android:backgroundTint="@color/control"
+            android:text="Check beta"
+            android:textColor="@color/text_secondary" />
 
-        <LinearLayout
+        <!-- Divider -->
+        <View
             android:layout_width="match_parent"
-            android:layout_height="96dp"
-            android:layout_marginBottom="36dp"
-            android:gravity="center"
-            android:orientation="horizontal">
+            android:layout_height="1dp"
+            android:layout_marginTop="16dp"
+            android:layout_marginBottom="12dp"
+            android:background="@color/line" />
 
-            <Button
-                android:id="@+id/btnMuteMic"
-                android:layout_width="0dp"
-                android:layout_height="64dp"
-                android:layout_weight="1"
-                android:backgroundTint="@color/control"
-                android:minWidth="0dp"
-                android:text="Mic"
-                android:textColor="@color/text_primary" />
+        <!-- App lock -->
+        <Button
+            android:id="@+id/btnAppLock"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:backgroundTint="@color/control"
+            android:text="App lock: OFF"
+            android:textColor="@color/text_primary" />
 
-            <Button
-                android:id="@+id/btnToggleSpeaker"
-                android:layout_width="0dp"
-                android:layout_height="64dp"
-                android:layout_marginStart="10dp"
-                android:layout_weight="1"
-                android:backgroundTint="@color/control"
-                android:minWidth="0dp"
-                android:text="Speaker"
-                android:textColor="@color/text_primary" />
+        <!-- Logout -->
+        <Button
+            android:id="@+id/btnLogout"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginTop="8dp"
+            android:backgroundTint="#7B1010"
+            android:text="Log out / Change account"
+            android:textColor="#FFCCCC" />
 
-            <Button
-                android:id="@+id/btnEndActiveCall"
-                android:layout_width="0dp"
-                android:layout_height="64dp"
-                android:layout_marginStart="10dp"
-                android:layout_weight="1"
-                android:backgroundTint="@color/control"
-                android:minWidth="0dp"
-                android:text="End"
-                android:textColor="@color/text_primary" />
-        </LinearLayout>
     </LinearLayout>
 
-</FrameLayout>
+</androidx.drawerlayout.widget.DrawerLayout>

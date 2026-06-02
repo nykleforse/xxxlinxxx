@@ -22,6 +22,7 @@ import android.util.Log
 import android.view.View
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ActivityCompat
@@ -38,6 +39,7 @@ import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.SetOptions
 import com.google.firebase.messaging.FirebaseMessaging
 import kotlinx.coroutines.*
+import kotlinx.coroutines.tasks.await
 import org.json.JSONArray
 import org.json.JSONObject
 import org.webrtc.*
@@ -47,28 +49,43 @@ import java.security.KeyFactory
 import java.security.KeyPair
 import java.security.KeyPairGenerator
 import java.security.MessageDigest
-import java.security.PrivateKey
-import java.security.PublicKey
 import java.security.SecureRandom
-import java.security.spec.PKCS8EncodedKeySpec
 import java.security.spec.X509EncodedKeySpec
 import java.util.Locale
 import java.util.TreeMap
-import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
 import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
-import javax.crypto.KeyGenerator
+import javax.crypto.KeyAgreement
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
+import java.security.spec.ECGenParameterSpec
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Color
 import android.text.InputType
-import android.text.Spannable
-import android.text.SpannableStringBuilder
-import android.text.style.ForegroundColorSpan
+import android.provider.Settings
+import android.view.Gravity
 import android.widget.EditText
+import android.widget.ImageView
+import android.widget.ProgressBar
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
+import androidx.core.content.FileProvider
+import androidx.core.view.GravityCompat
+import androidx.drawerlayout.widget.DrawerLayout
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
+import com.google.zxing.BarcodeFormat
+import com.google.zxing.EncodeHintType
+import com.google.zxing.qrcode.QRCodeWriter
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import kotlin.math.absoluteValue
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
 
 class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
@@ -91,7 +108,7 @@ class MainActivity : AppCompatActivity() {
 
     private var localId = ""
     private var remoteId = ""
-    private var currentCallId: String? = null
+    @Volatile private var currentCallId: String? = null
     private var pendingIncomingCall: IncomingCall? = null
 
     @Volatile
@@ -115,28 +132,79 @@ class MainActivity : AppCompatActivity() {
     private var rxVoiceSeq: Int? = null
     private enum class MsgStatus { SENT, DELIVERED, READ }
 
-    private val messageLogs = mutableMapOf<String, StringBuilder>()
-    private val pendingMessages = mutableMapOf<String, String>()
+    // ConcurrentHashMap: these maps are mutated from main thread (UI events,
+    // sendMessage callbacks), signaling thread (DataChannel handleMessagePacket),
+    // and Firestore listener thread (processReceiptDoc). Plain mutableMapOf would
+    // throw ConcurrentModificationException during renderChatMessages iteration.
+    private val messageLogs = java.util.concurrent.ConcurrentHashMap<String, StringBuilder>()
+    private val pendingMessages = java.util.concurrent.ConcurrentHashMap<String, String>()
     private var chatDividerLineIndex = -1   // index where "new messages" start; -1 = no divider
-    private val messageStatuses = mutableMapOf<String, MsgStatus>()                     // msgId -> status (my outgoing msgs)
-    private val myMessageLines  = mutableMapOf<String, MutableList<Pair<Int, String>>>() // chatId -> [(absLineIdx, msgId)]
-    private val incomingMsgIds  = mutableMapOf<String, MutableList<String>>()            // chatId -> [msgId from peer, awaiting READ]
-    private val pendingCloudReadReceipts = mutableMapOf<String, MutableSet<String>>()   // contactId -> msgIds received via cloud, not yet marked read
-    private val receivedMessageIds = mutableSetOf<String>()
+    private val messageStatuses = java.util.concurrent.ConcurrentHashMap<String, MsgStatus>()
+    private val incomingMsgIds  = java.util.concurrent.ConcurrentHashMap<String, MutableList<String>>()
+    private val pendingCloudReadReceipts = java.util.concurrent.ConcurrentHashMap<String, MutableSet<String>>()
+    private val receivedMessageIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
     private val messageSeqCounter = AtomicInteger(0)
     private var coreStarted = false
     private var currentVoiceMode = VoiceMode.COMFY
 
+    // ── App lock ──────────────────────────────────────────────────────────────
+    private var appUnlocked = false
+
+    // ── Chat search ───────────────────────────────────────────────────────────
+    private var chatSearchQuery = ""
+
     @Volatile private var answerProcessed = false
     @Volatile private var offerProcessed = false
-    private val processedCandidateIds = mutableSetOf<String>()
+    @Volatile private var myEcKeyPair: KeyPair? = null
+    private val processedCandidateIds: MutableSet<String> = java.util.Collections.synchronizedSet(mutableSetOf())
     private var voiceSent = 0
     private var voiceReceived = 0
     private var voicePlayed = 0
-    private var currentSessionId: String? = null
+    @Volatile private var currentSessionId: String? = null
     private val dismissedIncomingSessions = mutableSetOf<String>()
     private val photoAuthPicker = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let { authenticateWithPhoto(it) }
+    }
+
+    // ── Photo transfer ────────────────────────────────────────────────────────
+    // Mutated from main (UI), Firestore listener thread, and WebRTC signaling
+    // thread. @Volatile fixes memory-visibility races on multi-core ARM.
+    @Volatile private var photoTransferPc: PeerConnection? = null
+    @Volatile private var photoTransferDc: DataChannel? = null
+    @Volatile private var outgoingPhotoTransferId: String? = null
+    @Volatile private var outgoingPhotoChatId: String? = null
+    private var incomingTransferListener: ListenerRegistration? = null
+    // Lock for cleanupPhotoTransfer to prevent concurrent double-dispose
+    // from main (PHO_END), IO scope (send catch), and WebRTC signaling threads.
+    private val photoTransferLock = Any()
+    // Listeners for the active photo transfer — kept separate from `listeners` so
+    // removeListeners() (called on call setup/teardown) cannot kill a mid-transfer.
+    private val photoTransferListeners = mutableListOf<ListenerRegistration>()
+    // Guard against double-send (observer + polling both triggering sendPhotoOverChannel)
+    @Volatile private var photoSendInProgress = false
+
+    // Incoming assembly
+    private var assemblingTransferId: String? = null
+    private var assemblingChatId: String? = null
+    private var assemblingChunks: Array<ByteArray?>? = null
+    private var assemblingExpected: Int = 0
+    private var assemblingKey: ByteArray? = null
+    private var assemblingIv: ByteArray? = null
+    private var assemblingReceived: Int = 0
+
+    private val photoPickerLauncher = registerForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri -> uri?.let { ioScope.launch { prepareAndSendPhoto(it) } } }
+
+    private val qrScanLauncher = registerForActivityResult(ScanContract()) { result ->
+        val content = result.contents ?: return@registerForActivityResult
+        val scannedId = content.trim().uppercase(Locale.US)
+        if (scannedId.matches(Regex("[A-Z0-9]{4,32}"))) {
+            binding.addContactIdInput.setText(scannedId)
+            showAddContactScreen()
+        } else {
+            Toast.makeText(this, "Invalid QR code", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private var pendingBackupKey: SecretKey? = null
@@ -180,6 +248,21 @@ class MainActivity : AppCompatActivity() {
         setContentView(binding.root)
         createNotificationChannel()
 
+        // Hardware/gesture back: navigate up within app instead of exiting
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                when {
+                    binding.drawerLayout.isDrawerOpen(GravityCompat.START) ->
+                        binding.drawerLayout.closeDrawer(GravityCompat.START)
+                    binding.chatScreen.visibility == View.VISIBLE ->
+                        showContactList()
+                    binding.addContactScreen.visibility == View.VISIBLE ->
+                        showContactList()
+                    else -> finish()
+                }
+            }
+        })
+
         prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         initFirebase()
         currentVoiceMode.codec2Mode?.let { codec2 = Codec2Bridge(it) }
@@ -187,9 +270,9 @@ class MainActivity : AppCompatActivity() {
             photoAuthPicker.launch("image/*")
         }
 
-        val savedAccount = prefs.getString(KEY_PHOTO_ACCOUNT_DOC, null)
         val savedId = prefs.getString(KEY_LOCAL_ID, null)
-        if (!savedAccount.isNullOrBlank() && !savedId.isNullOrBlank()) {
+        val savedSecret = prefs.getString(KEY_PHOTO_ACCOUNT_SECRET, null)
+        if (!savedId.isNullOrBlank() && !savedSecret.isNullOrBlank()) {
             continueWithLocalIdentity(savedId)
         } else {
             showPhotoAuthScreen()
@@ -199,12 +282,21 @@ class MainActivity : AppCompatActivity() {
     private fun continueWithLocalIdentity(id: String) {
         localId = id
         prefs.edit().putString(KEY_LOCAL_ID, localId).apply()
-        ensureMessageKeyPair()
         receivedMessageIds += prefs.getStringSet(KEY_SEEN_MESSAGE_IDS, emptySet()).orEmpty()
         binding.myId.text = "Your ID: $localId"
         binding.photoAuthScreen.visibility = View.GONE
         binding.contactListScreen.visibility = View.VISIBLE
-        startCore()
+
+        // Derive EC keypair off main thread; startCore only after keypair is ready
+        val secretB64 = prefs.getString(KEY_PHOTO_ACCOUNT_SECRET, null)
+        if (secretB64 == null) {
+            showPhotoAuthScreen()
+            return
+        }
+        ioScope.launch {
+            myEcKeyPair = deriveEcKeyPair(b64decode(secretB64))
+            withContext(Dispatchers.Main) { startCore() }
+        }
     }
 
     private fun showPhotoAuthScreen() {
@@ -219,14 +311,51 @@ class MainActivity : AppCompatActivity() {
         binding.btnChooseAuthPhoto.isEnabled = db != null
     }
 
+    private fun doLogout() {
+        // Stop ongoing background work
+        messagePollJob?.cancel()
+        messagePollJob = null
+        cancelCallTimeout()
+        removeListeners()
+        incomingListener?.remove()
+        incomingListener = null
+        incomingTransferListener?.remove()
+        incomingTransferListener = null
+        cleanupPhotoTransfer()
+
+        // Wipe all local SharedPreferences
+        prefs.edit().clear().apply()
+
+        // Delete saved photos from internal storage
+        runCatching { java.io.File(filesDir, "photos").deleteRecursively() }
+
+        // Restart Activity — onCreate will find no saved ID and show auth screen
+        recreate()
+    }
+
     override fun onStart() {
         super.onStart()
         appInForeground = true
+        prefs.edit().putBoolean(KEY_APP_IN_FOREGROUND, true).apply()
         clearNotificationBadges()
+        checkAndShowLockScreen()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.action == CallForegroundService.ACTION_END_CALL) {
+            disconnectCall()
+        }
     }
 
     override fun onStop() {
         appInForeground = false
+        prefs.edit().putBoolean(KEY_APP_IN_FOREGROUND, false).apply()
+        // Lock app when going to background (require PIN/biometric on next foreground)
+        if (prefs.getBoolean(KEY_APP_LOCK_ENABLED, false)) {
+            appUnlocked = false
+        }
         super.onStop()
     }
 
@@ -254,7 +383,21 @@ class MainActivity : AppCompatActivity() {
         publishPublicMessageKey()
         syncFcmRegistrationToken()
         listenIncomingCalls()
+        listenIncomingPhotoTransfers()
         startMessagePolling()
+        BackupWorker.schedule(this)
+        // Silent background update check — shows dialog only if update found
+        ioScope.launch {
+            kotlinx.coroutines.delay(8_000)
+            runCatching {
+                val info = fetchLatestRelease() ?: return@launch
+                if (isNewerVersion(info.tagName, BuildConfig.VERSION_NAME)) {
+                    withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        showUpdateDialog(info, BuildConfig.VERSION_NAME)
+                    }
+                }
+            }
+        }
     }
 
     private fun hasRecordAudioPermission(): Boolean =
@@ -290,27 +433,38 @@ class MainActivity : AppCompatActivity() {
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == REQ_RECORD_AUDIO) {
-            val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
-            val action = pendingMicAction
-            pendingMicAction = null
-            if (!granted) {
-                binding.status.text = "Microphone permission is required for calls"
-                return
+        when (requestCode) {
+            REQ_RECORD_AUDIO -> {
+                val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
+                val action = pendingMicAction
+                pendingMicAction = null
+                if (!granted) {
+                    binding.status.text = "Microphone permission is required for calls"
+                    return
+                }
+                when (action) {
+                    PendingMicAction.OUTGOING_CALL -> call()
+                    PendingMicAction.ACCEPT_INCOMING -> acceptPendingIncoming()
+                    null -> {}
+                }
             }
-            when (action) {
-                PendingMicAction.OUTGOING_CALL -> call()
-                PendingMicAction.ACCEPT_INCOMING -> acceptPendingIncoming()
-                null -> {}
+            REQ_POST_NOTIFICATIONS -> {
+                // Result is silently OK — we just continue running. If denied,
+                // notification-based features (incoming-call alerts, message badges)
+                // are degraded but the app still works.
+                val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
+                if (!granted) {
+                    Log.i(TAG, "POST_NOTIFICATIONS denied — notifications disabled")
+                }
             }
         }
     }
 
     private fun initAudio() {
-        val am = getSystemService(AUDIO_SERVICE) as AudioManager
-        audioManager = am
-        am.mode = AudioManager.MODE_IN_COMMUNICATION
-        am.isSpeakerphoneOn = true
+        // Only cache the AudioManager reference — do NOT change mode or speakerphone here.
+        // Audio mode is set in configureAudioForCall() when a call actually begins,
+        // and restored in restoreAudioAfterCall() when it ends.
+        audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
     }
 
     private fun configureAudioForCall() {
@@ -390,7 +544,7 @@ class MainActivity : AppCompatActivity() {
             iceCandidatePoolSize = 4
         }
 
-        peerConnection = peerFactory.createPeerConnection(rtcConfig, object : PeerConnection.Observer {
+        val pc = peerFactory.createPeerConnection(rtcConfig, object : PeerConnection.Observer {
             override fun onDataChannel(dc: DataChannel) {
                 when (dc.label()) {
                     "voice" -> {
@@ -440,7 +594,12 @@ class MainActivity : AppCompatActivity() {
                 Log.d(LOG_TAG, "remote audio track added kind=${p0?.track()?.kind()}")
             }
             override fun onRenegotiationNeeded() {}
-        })!!
+        }) ?: run {
+            Log.e(TAG, "initPeerConnection: createPeerConnection returned null")
+            runOnUiThread { Toast.makeText(this, "WebRTC init failed", Toast.LENGTH_SHORT).show() }
+            return
+        }
+        peerConnection = pc
 
         if (currentVoiceMode.webRtcAudio) {
             attachLocalWebRtcAudio()
@@ -452,15 +611,27 @@ class MainActivity : AppCompatActivity() {
                     ordered = true
                     maxRetransmits = 2
                 }
-                voiceChannel = peerConnection.createDataChannel("voice", voiceInit)
-                setupVoiceReceiver(voiceChannel!!)
+                val vc = peerConnection.createDataChannel("voice", voiceInit)
+                if (vc == null) {
+                    Log.e(TAG, "createDataChannel(voice) returned null — aborting setup")
+                    runOnUiThread { Toast.makeText(this, "Voice channel init failed", Toast.LENGTH_SHORT).show() }
+                    return
+                }
+                voiceChannel = vc
+                setupVoiceReceiver(vc)
             }
 
             val messageInit = DataChannel.Init().apply {
                 ordered = true
             }
-            messageChannel = peerConnection.createDataChannel("messages", messageInit)
-            setupMessageReceiver(messageChannel!!)
+            val mc = peerConnection.createDataChannel("messages", messageInit)
+            if (mc == null) {
+                Log.e(TAG, "createDataChannel(messages) returned null — aborting setup")
+                runOnUiThread { Toast.makeText(this, "Message channel init failed", Toast.LENGTH_SHORT).show() }
+                return
+            }
+            messageChannel = mc
+            setupMessageReceiver(mc)
         }
     }
 
@@ -470,11 +641,78 @@ class MainActivity : AppCompatActivity() {
             .setPassword(BuildConfig.TURN_PASSWORD)
             .createIceServer()
 
+    private fun showMyQrCode() {
+        if (localId.isBlank()) return
+        val bitmap = runCatching { generateQrBitmap(localId) }.getOrElse {
+            Toast.makeText(this, "QR generation failed", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val dp = resources.displayMetrics.density
+        val sizePx = (260 * dp).toInt()
+        val iv = ImageView(this).apply {
+            setImageBitmap(bitmap)
+            scaleType = ImageView.ScaleType.FIT_CENTER
+        }
+        val tv = android.widget.TextView(this).apply {
+            text = localId
+            gravity = Gravity.CENTER
+            textSize = 20f
+            setTextColor(0xFF000000.toInt())
+            typeface = android.graphics.Typeface.MONOSPACE
+            setPadding(0, (12 * dp).toInt(), 0, 0)
+        }
+        val container = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding((24 * dp).toInt(), (24 * dp).toInt(), (24 * dp).toInt(), (8 * dp).toInt())
+            addView(iv, android.widget.LinearLayout.LayoutParams(sizePx, sizePx))
+            addView(tv)
+        }
+        AlertDialog.Builder(this)
+            .setView(container)
+            .setPositiveButton("Close", null)
+            .show()
+    }
+
+    private fun generateQrBitmap(content: String, sizePx: Int = 600): Bitmap {
+        val hints = mapOf(EncodeHintType.MARGIN to 2)
+        val matrix = QRCodeWriter().encode(content, BarcodeFormat.QR_CODE, sizePx, sizePx, hints)
+        val bmp = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.RGB_565)
+        for (x in 0 until sizePx) {
+            for (y in 0 until sizePx) {
+                bmp.setPixel(x, y, if (matrix[x, y]) Color.BLACK else Color.WHITE)
+            }
+        }
+        return bmp
+    }
+
     private fun bindUI() {
         binding.btnBack.setOnClickListener { showContactList() }
         binding.btnOpenAddContact.setOnClickListener { showAddContactScreen() }
         binding.btnBackFromAddContact.setOnClickListener { showContactList() }
-        binding.btnCopyMyId.setOnClickListener { copyLocalId() }
+
+        // Drawer
+        binding.btnMenu.setOnClickListener { binding.drawerLayout.openDrawer(GravityCompat.START) }
+        binding.btnDrawerClose.setOnClickListener { binding.drawerLayout.closeDrawer(GravityCompat.START) }
+        binding.btnCopyMyId.setOnClickListener {
+            binding.drawerLayout.closeDrawer(GravityCompat.START)
+            copyLocalId()
+        }
+        binding.btnDrawerShowQr.setOnClickListener {
+            binding.drawerLayout.closeDrawer(GravityCompat.START)
+            showMyQrCode()
+        }
+        binding.btnDrawerScanQr.setOnClickListener {
+            binding.drawerLayout.closeDrawer(GravityCompat.START)
+            qrScanLauncher.launch(
+                ScanOptions().apply {
+                    setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                    setBeepEnabled(false)
+                    setOrientationLocked(false)
+                }
+            )
+        }
+
         binding.btnCall.setOnClickListener {
             call()
         }
@@ -504,10 +742,78 @@ class MainActivity : AppCompatActivity() {
             updateDebugStatus(if (speakerEnabled) "speaker on" else "phone audio")
         }
         binding.btnSend.setOnClickListener { sendMessage() }
+        binding.btnAttachPhoto.setOnClickListener {
+            val targetId = selectedContactId()
+            if (targetId.isBlank()) {
+                Toast.makeText(this, "Open a chat first", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            photoPickerLauncher.launch("image/*")
+        }
+        binding.btnBannerAddContact.setOnClickListener { showAddContactFromBannerDialog(remoteId) }
         binding.btnAddContact.setOnClickListener { saveCurrentContact(openAfterSave = true) }
         binding.btnExportBackup.setOnClickListener { exportBackupWithPhotoKey() }
         binding.btnImportBackup.setOnClickListener {
             restoreFileLauncher.launch(arrayOf("application/octet-stream", "*/*"))
+        }
+
+        // Search in chat
+        binding.btnSearch.setOnClickListener {
+            if (binding.chatSearchBar.visibility == View.VISIBLE) {
+                binding.chatSearchBar.visibility = View.GONE
+                chatSearchQuery = ""
+                binding.chatSearchInput.text?.clear()
+                refreshChatDisplay(remoteId)
+            } else {
+                binding.chatSearchBar.visibility = View.VISIBLE
+                binding.chatSearchInput.requestFocus()
+            }
+        }
+        binding.btnClearSearch.setOnClickListener {
+            binding.chatSearchInput.text?.clear()
+            chatSearchQuery = ""
+            refreshChatDisplay(remoteId)
+        }
+        binding.chatSearchInput.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) {
+                chatSearchQuery = s?.toString() ?: ""
+                refreshChatDisplay(remoteId)
+            }
+        })
+
+        // App lock button
+        binding.btnAppLock.setOnClickListener {
+            binding.drawerLayout.closeDrawer(GravityCompat.START)
+            showAppLockSettings()
+        }
+        updateAppLockButton()
+
+        // Lock screen
+        binding.btnUnlock.setOnClickListener {
+            val pin = binding.pinInput.text.toString()
+            attemptPinUnlock(pin)
+        }
+        binding.btnUseBiometric.setOnClickListener {
+            showBiometricPrompt()
+        }
+        binding.btnCheckUpdates.setOnClickListener {
+            binding.drawerLayout.closeDrawer(GravityCompat.START)
+            checkForUpdates(fromUser = true)
+        }
+        binding.btnCheckBeta.setOnClickListener {
+            binding.drawerLayout.closeDrawer(GravityCompat.START)
+            checkForBeta()
+        }
+        binding.btnLogout.setOnClickListener {
+            binding.drawerLayout.closeDrawer(GravityCompat.START)
+            AlertDialog.Builder(this)
+                .setTitle("Log out?")
+                .setMessage("All local data (chats, contacts, account key) will be erased from this device. Export a backup first if you want to restore later.")
+                .setPositiveButton("Log out") { _, _ -> doLogout() }
+                .setNegativeButton("Cancel", null)
+                .show()
         }
         renderContacts()
         showContactList()
@@ -517,6 +823,49 @@ class MainActivity : AppCompatActivity() {
         updateFirebaseControls()
     }
 
+    /** Show/hide the "unsaved contact" banner for the currently open chat. */
+    private fun updateAddContactBanner(id: String) {
+        // Show banner only when the user has NOT explicitly added this contact.
+        // rememberContact() adds IDs to savedContactIds without setting contactNameKey —
+        // we distinguish by checking whether contactNameKey was explicitly written.
+        val explicitlySaved = prefs.contains(contactNameKey(id))
+        if (explicitlySaved) {
+            binding.addContactBanner.visibility = View.GONE
+        } else {
+            binding.bannerContactId.text = "Unknown · $id"
+            binding.addContactBanner.visibility = View.VISIBLE
+        }
+    }
+
+    private fun showAddContactFromBannerDialog(id: String) {
+        if (id.isBlank()) return
+        val input = EditText(this).apply {
+            hint = "Name (optional)"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS
+            setPadding(
+                (24 * resources.displayMetrics.density).toInt(), 0,
+                (24 * resources.displayMetrics.density).toInt(), 0
+            )
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Add contact")
+            .setMessage("ID: $id")
+            .setView(input)
+            .setPositiveButton("Save") { _, _ ->
+                val name = input.text.toString().trim()
+                prefs.edit()
+                    .putString(contactNameKey(id), name)
+                    .putStringSet(KEY_CONTACT_IDS, savedContactIds() + id)
+                    .apply()
+                if (name.isNotBlank()) binding.chatTitle.text = name
+                updateAddContactBanner(id)
+                renderContacts()
+                Toast.makeText(this, "Contact saved", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
     private fun copyLocalId() {
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         clipboard.setPrimaryClip(ClipData.newPlainText("Your ID", localId))
@@ -524,64 +873,27 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun authenticateWithPhoto(uri: Uri) {
-        val firestore = db ?: run {
-            binding.photoAuthStatus.text = "Firebase is not ready"
-            return
-        }
         binding.btnChooseAuthPhoto.isEnabled = false
         binding.photoAuthStatus.text = "Reading photo"
         ioScope.launch {
-            val authMaterialResult = runCatching { photoAuthMaterial(uri) }
-            withContext(Dispatchers.Main) {
-                if (authMaterialResult.isFailure) {
+            val authMaterial = runCatching { photoAuthMaterial(uri) }.getOrElse { _ ->
+                withContext(Dispatchers.Main) {
                     binding.photoAuthStatus.text = "Photo read failed"
                     binding.btnChooseAuthPhoto.isEnabled = true
-                    return@withContext
                 }
-                binding.photoAuthStatus.text = "Checking account"
+                return@launch
             }
-
-            val authMaterial = authMaterialResult.getOrThrow()
-            val docId = authMaterial.documentId
-            firestore.collection(PHOTO_ACCOUNTS_COLLECTION).document(docId).get()
-                .addOnSuccessListener { document ->
-                    val restoredId = document.getString("localId")?.takeIf { it.isNotBlank() }
-                    if (restoredId != null) {
-                        restoreMessageKeyPairFromPhotoAccount(document, authMaterial.secret)
-                        savePhotoAccount(docId, restoredId, authMaterial.secret)
-                        continueWithLocalIdentity(restoredId)
-                        backupMessageKeyPairToPhotoAccount(docId, authMaterial.secret)
-                        return@addOnSuccessListener
-                    }
-
-                    val id = prefs.getString(KEY_LOCAL_ID, null)?.takeIf { it.isNotBlank() }
-                        ?: generateLocalId()
-                    firestore.collection(PHOTO_ACCOUNTS_COLLECTION).document(docId).set(
-                        mapOf(
-                            "localId" to id,
-                            "createdAt" to System.currentTimeMillis(),
-                            "updatedAt" to System.currentTimeMillis()
-                        ),
-                        SetOptions.merge()
-                    ).addOnSuccessListener {
-                        savePhotoAccount(docId, id, authMaterial.secret)
-                        continueWithLocalIdentity(id)
-                        backupMessageKeyPairToPhotoAccount(docId, authMaterial.secret)
-                    }.addOnFailureListener { error ->
-                        binding.photoAuthStatus.text = "Account save failed: ${error.message}"
-                        binding.btnChooseAuthPhoto.isEnabled = true
-                    }
-                }
-                .addOnFailureListener { error ->
-                    binding.photoAuthStatus.text = "Account check failed: ${error.message}"
-                    binding.btnChooseAuthPhoto.isEnabled = true
-                }
+            // localId and keypair derived entirely on-device — server stores nothing about the photo
+            val id = deriveLocalId(authMaterial.secret)
+            savePhotoAccount(id, authMaterial.secret)
+            withContext(Dispatchers.Main) {
+                continueWithLocalIdentity(id)
+            }
         }
     }
 
-    private fun savePhotoAccount(docId: String, id: String, secret: ByteArray) {
+    private fun savePhotoAccount(id: String, secret: ByteArray) {
         prefs.edit()
-            .putString(KEY_PHOTO_ACCOUNT_DOC, docId)
             .putString(KEY_LOCAL_ID, id)
             .putString(KEY_PHOTO_ACCOUNT_SECRET, b64(secret))
             .apply()
@@ -591,25 +903,34 @@ class MainActivity : AppCompatActivity() {
         val photoBytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
             ?: error("empty photo")
         val photoHash = sha256(photoBytes)
-        val documentId = sha256("$PHOTO_ACCOUNT_SALT:${hex(photoHash)}".toByteArray(Charsets.UTF_8))
-            .let(::hex)
         val secret = sha256("$PHOTO_ACCOUNT_KEY_SALT:${hex(photoHash)}".toByteArray(Charsets.UTF_8))
-        return PhotoAuthMaterial(documentId, secret)
+        return PhotoAuthMaterial(secret)
     }
 
-    private fun getOrCreateLocalId(): String {
-        prefs.getString(KEY_LOCAL_ID, null)?.let { return it }
-        val generated = generateLocalId()
-        prefs.edit().putString(KEY_LOCAL_ID, generated).apply()
-        return generated
-    }
+    /** 8-char uppercase hex ID, derived deterministically from photo secret. */
+    private fun deriveLocalId(photoSecret: ByteArray): String =
+        sha256("xlink-id-v1:".toByteArray(Charsets.UTF_8) + photoSecret)
+            .take(4)
+            .joinToString("") { "%02X".format(it) }
 
-    private fun generateLocalId(): String {
-        val generated = UUID.randomUUID().toString()
-            .replace("-", "")
-            .take(8)
-            .uppercase(Locale.US)
-        return generated
+    /**
+     * Derives an EC P-256 keypair deterministically from photo secret.
+     * Same photo → same keypair, on any device, with no server involvement.
+     * 64 bytes of deterministic material cover any provider's internal retry loop.
+     */
+    private fun deriveEcKeyPair(photoSecret: ByteArray): KeyPair {
+        val seed = sha256("xlink-ec-key-v1:".toByteArray(Charsets.UTF_8) + photoSecret)
+        val material = seed + sha256(seed) // 64 bytes
+        var pos = 0
+        val det = object : SecureRandom() {
+            override fun nextBytes(out: ByteArray) {
+                for (i in out.indices) { out[i] = material.getOrElse(pos++) { 0 } }
+            }
+            override fun generateSeed(n: Int): ByteArray = ByteArray(n)
+        }
+        val kpg = KeyPairGenerator.getInstance("EC")
+        kpg.initialize(ECGenParameterSpec("secp256r1"), det)
+        return kpg.generateKeyPair()
     }
 
     private fun sha256(bytes: ByteArray): ByteArray =
@@ -618,37 +939,16 @@ class MainActivity : AppCompatActivity() {
     private fun hex(bytes: ByteArray): String =
         bytes.joinToString(separator = "") { "%02x".format(it) }
 
-    private fun ensureMessageKeyPair() {
-        if (prefs.contains(KEY_MESSAGE_PUBLIC_KEY) && prefs.contains(KEY_MESSAGE_PRIVATE_KEY)) return
-
-        val generator = KeyPairGenerator.getInstance("RSA")
-        generator.initialize(RSA_KEY_BITS, SecureRandom())
-        val pair = generator.generateKeyPair()
-        prefs.edit()
-            .putString(KEY_MESSAGE_PUBLIC_KEY, b64(pair.public.encoded))
-            .putString(KEY_MESSAGE_PRIVATE_KEY, b64(pair.private.encoded))
-            .apply()
-        backupMessageKeyPairToPhotoAccount()
-    }
-
-    private fun localMessageKeyPair(): KeyPair {
-        ensureMessageKeyPair()
-        val keyFactory = KeyFactory.getInstance("RSA")
-        val publicBytes = b64decode(prefs.getString(KEY_MESSAGE_PUBLIC_KEY, "").orEmpty())
-        val privateBytes = b64decode(prefs.getString(KEY_MESSAGE_PRIVATE_KEY, "").orEmpty())
-        val publicKey = keyFactory.generatePublic(X509EncodedKeySpec(publicBytes))
-        val privateKey = keyFactory.generatePrivate(PKCS8EncodedKeySpec(privateBytes))
-        return KeyPair(publicKey, privateKey)
-    }
 
     private fun publishPublicMessageKey() {
         val firestore = db ?: return
-        val publicKey = prefs.getString(KEY_MESSAGE_PUBLIC_KEY, null) ?: return
+        val kp = myEcKeyPair ?: return
+        val publicKeyB64 = b64(kp.public.encoded)
         val userData = mutableMapOf<String, Any>(
-                "id" to localId,
-                "messagePublicKey" to publicKey,
-                "keyAlgorithm" to RSA_KEY_ALGORITHM,
-                "updatedAt" to System.currentTimeMillis()
+            "id" to localId,
+            "messagePublicKey" to publicKeyB64,
+            "keyAlgorithm" to EC_KEY_ALGORITHM,
+            "updatedAt" to System.currentTimeMillis()
         )
         prefs.getString(KEY_FCM_TOKEN, null)?.takeIf { it.isNotBlank() }?.let {
             userData["fcmToken"] = it
@@ -656,74 +956,10 @@ class MainActivity : AppCompatActivity() {
         }
         firestore.collection("users").document(localId).set(userData, SetOptions.merge())
             .addOnFailureListener { error ->
-            updateDebugStatus("key publish failed: ${error.message}")
-        }
+                updateDebugStatus("key publish failed: ${error.message}")
+            }
     }
 
-    private fun backupMessageKeyPairToPhotoAccount(
-        docId: String? = prefs.getString(KEY_PHOTO_ACCOUNT_DOC, null),
-        secret: ByteArray? = prefs.getString(KEY_PHOTO_ACCOUNT_SECRET, null)?.let(::b64decode)
-    ) {
-        val firestore = db ?: return
-        val accountId = docId?.takeIf { it.isNotBlank() } ?: return
-        val bundleSecret = secret ?: return
-        val publicKey = prefs.getString(KEY_MESSAGE_PUBLIC_KEY, null) ?: return
-        val privateKey = prefs.getString(KEY_MESSAGE_PRIVATE_KEY, null) ?: return
-        val safeLocalId = localId.takeIf { it.isNotBlank() }
-            ?: prefs.getString(KEY_LOCAL_ID, null)
-            ?: return
-
-        val payload = JSONObject()
-            .put("publicKey", publicKey)
-            .put("privateKey", privateKey)
-            .put("savedAt", System.currentTimeMillis())
-            .toString()
-            .toByteArray(Charsets.UTF_8)
-        val iv = ByteArray(AES_GCM_IV_BYTES).also { SecureRandom().nextBytes(it) }
-        val cipher = Cipher.getInstance(AES_MESSAGE_ALGORITHM)
-        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(bundleSecret, "AES"), GCMParameterSpec(AES_GCM_TAG_BITS, iv))
-        val cipherText = cipher.doFinal(payload)
-
-        firestore.collection(PHOTO_ACCOUNTS_COLLECTION).document(accountId).set(
-            mapOf(
-                "localId" to safeLocalId,
-                "updatedAt" to System.currentTimeMillis(),
-                "messageKeyBundle" to b64(cipherText),
-                "messageKeyBundleIv" to b64(iv),
-                "messageKeyBundleVersion" to MESSAGE_KEY_BUNDLE_VERSION
-            ),
-            SetOptions.merge()
-        ).addOnFailureListener { error ->
-            updateDebugStatus("key backup failed: ${error.message}")
-        }
-    }
-
-    private fun restoreMessageKeyPairFromPhotoAccount(
-        document: DocumentSnapshot,
-        secret: ByteArray
-    ): Boolean {
-        val bundle = document.getString("messageKeyBundle") ?: return false
-        val iv = document.getString("messageKeyBundleIv") ?: return false
-        return runCatching {
-            val cipher = Cipher.getInstance(AES_MESSAGE_ALGORITHM)
-            cipher.init(
-                Cipher.DECRYPT_MODE,
-                SecretKeySpec(secret, "AES"),
-                GCMParameterSpec(AES_GCM_TAG_BITS, b64decode(iv))
-            )
-            val json = JSONObject(String(cipher.doFinal(b64decode(bundle)), Charsets.UTF_8))
-            val publicKey = json.getString("publicKey")
-            val privateKey = json.getString("privateKey")
-            prefs.edit()
-                .putString(KEY_MESSAGE_PUBLIC_KEY, publicKey)
-                .putString(KEY_MESSAGE_PRIVATE_KEY, privateKey)
-                .apply()
-            true
-        }.getOrElse { error ->
-            updateDebugStatus("key restore failed: ${error.message}")
-            false
-        }
-    }
 
     private fun syncFcmRegistrationToken() {
         FirebaseMessaging.getInstance().token
@@ -794,7 +1030,24 @@ class MainActivity : AppCompatActivity() {
     private fun savedContactIds(): Set<String> =
         prefs.getStringSet(KEY_CONTACT_IDS, emptySet()).orEmpty()
 
+    /** Count contacts with unread messages and update the badge next to "Chats". */
+    private fun updateUnreadBadge() {
+        if (!::binding.isInitialized) return
+        val count = savedContactIds().count { id ->
+            val lines = splitLogLines(messageLogFor(id).toString()).size
+            val read  = prefs.getInt("$KEY_CHAT_READ_PREFIX$id", 0)
+            lines > read
+        }
+        if (count > 0) {
+            binding.tvUnreadCount.text = count.toString()
+            binding.tvUnreadCount.visibility = View.VISIBLE
+        } else {
+            binding.tvUnreadCount.visibility = View.GONE
+        }
+    }
+
     private fun renderContacts() {
+        updateUnreadBadge()
         binding.contactsList.removeAllViews()
         val contacts = savedContactIds()
             .sortedWith(compareBy<String> { contactName(it).lowercase(Locale.US) }.thenBy { it })
@@ -809,22 +1062,98 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        val dp = resources.displayMetrics.density
         contacts.forEach { id ->
-            val item = TextView(this).apply {
+            val hasUnread = run {
+                val lines = splitLogLines(messageLogFor(id).toString()).size
+                lines > prefs.getInt("$KEY_CHAT_READ_PREFIX$id", 0)
+            }
+
+            // Last message preview (first 60 chars of last line, stripped of author prefix)
+            val lastMsg = run {
+                val lines = splitLogLines(messageLogFor(id).toString())
+                if (lines.isEmpty()) "" else {
+                    val raw = lineText(lines.last())
+                    val ci = raw.indexOf(": ")
+                    val body = if (ci >= 0) raw.substring(ci + 2) else raw
+                    if (body.startsWith("[PHOTO:") && body.endsWith("]")) "📷 Photo"
+                    else body.take(60)
+                }
+            }
+
+            // Name row: name + blue dot
+            val nameView = android.widget.TextView(this).apply {
                 text = contactName(id)
                 setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_primary))
                 textSize = 16f
-                setPadding(18, 16, 18, 16)
-                setBackgroundColor(ContextCompat.getColor(this@MainActivity, R.color.control))
-                setOnClickListener { openChat(id) }
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             }
-            val params = LinearLayout.LayoutParams(
+
+            val dotView = android.view.View(this).apply {
+                val size = (9 * dp).toInt()
+                layoutParams = LinearLayout.LayoutParams(size, size).apply {
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                    marginStart = (8 * dp).toInt()
+                }
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    shape = android.graphics.drawable.GradientDrawable.OVAL
+                    setColor(0xFF2196F3.toInt())
+                }
+                visibility = if (hasUnread) View.VISIBLE else View.GONE
+            }
+
+            val topRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                addView(nameView)
+                addView(dotView)
+            }
+
+            // Preview row (shown only if not empty)
+            val previewView = android.widget.TextView(this).apply {
+                text = lastMsg
+                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_muted))
+                textSize = 13f
+                setSingleLine(true)
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { topMargin = (2 * dp).toInt() }
+                visibility = if (lastMsg.isNotEmpty()) View.VISIBLE else View.GONE
+            }
+
+            // Card
+            val card = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+                    cornerRadius = 14 * dp
+                    setColor(0xFF1E1E1E.toInt())
+                }
+                val padH = (16 * dp).toInt()
+                val padV = (14 * dp).toInt()
+                setPadding(padH, padV, padH, padV)
+                isClickable = true
+                isFocusable = true
+                foreground = ContextCompat.getDrawable(
+                    this@MainActivity,
+                    android.R.attr.selectableItemBackground.let { attr ->
+                        val ta = obtainStyledAttributes(intArrayOf(attr))
+                        val res = ta.getResourceId(0, 0)
+                        ta.recycle()
+                        res
+                    }
+                )
+                addView(topRow)
+                addView(previewView)
+                setOnClickListener { openChat(id) }
+                setOnLongClickListener { showContactContextMenu(id); true }
+            }
+
+            binding.contactsList.addView(card, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                bottomMargin = 8
-            }
-            binding.contactsList.addView(item, params)
+            ).apply { bottomMargin = (8 * dp).toInt() })
         }
     }
 
@@ -836,7 +1165,7 @@ class MainActivity : AppCompatActivity() {
         binding.outgoingCallScreen.visibility = View.GONE
         binding.activeCallScreen.visibility = View.GONE
         showCallControls(false)
-        renderContacts()
+        renderContacts()   // also calls updateUnreadBadge()
     }
 
     private fun showAddContactScreen() {
@@ -861,30 +1190,33 @@ class MainActivity : AppCompatActivity() {
     private fun openChat(id: String) {
         remoteId = id
         binding.chatTitle.text = contactName(id)
+        updateAddContactBanner(id)
+        // Reset search when switching chats
+        chatSearchQuery = ""
+        binding.chatSearchInput.text?.clear()
+        binding.chatSearchBar.visibility = View.GONE
+        // Dismiss any notification for this contact immediately
+        notificationManager().cancel((NOTIFICATION_MESSAGE_ID_BASE + id.hashCode()).absoluteValue)
 
         val allText = messageLogFor(id).toString()
-        val lines = allText.split('\n').filter { it.isNotEmpty() }
+        val lines = splitLogLines(allText)
         val savedCount = prefs.getInt("$KEY_CHAT_READ_PREFIX$id", 0)
         val newCount = (lines.size - savedCount).coerceAtLeast(0)
 
         // Mark all current messages as read
         prefs.edit().putInt("$KEY_CHAT_READ_PREFIX$id", lines.size).apply()
 
-        if (newCount > 0 && savedCount > 0) {
-            chatDividerLineIndex = savedCount
-            binding.messages.text = buildChatSpannable(id, lines.take(savedCount), 0)
-            binding.newMessagesText.text = buildChatSpannable(id, lines.takeLast(newCount), savedCount)
-            binding.newMessagesDivider.visibility = View.VISIBLE
-            binding.newMessagesText.visibility = View.VISIBLE
+        val dividerAt = if (newCount > 0 && savedCount > 0) savedCount else -1
+        chatDividerLineIndex = dividerAt
+        renderChatMessages(id, lines, dividerAt)
+        if (dividerAt >= 0) {
             binding.messagesScroll.post {
-                binding.messagesScroll.smoothScrollTo(0, binding.newMessagesDivider.top)
+                chatDividerView?.let { dv ->
+                    binding.messagesScroll.smoothScrollTo(0, dv.top)
+                } ?: binding.messagesScroll.fullScroll(android.view.View.FOCUS_DOWN)
             }
         } else {
-            chatDividerLineIndex = -1
-            binding.messages.text = buildChatSpannable(id, lines, 0)
-            binding.newMessagesDivider.visibility = View.GONE
-            binding.newMessagesText.visibility = View.GONE
-            binding.messagesScroll.post { binding.messagesScroll.fullScroll(View.FOCUS_DOWN) }
+            binding.messagesScroll.post { binding.messagesScroll.fullScroll(android.view.View.FOCUS_DOWN) }
         }
 
         // Send READ receipts for DataChannel messages received before chat was opened
@@ -919,6 +1251,14 @@ class MainActivity : AppCompatActivity() {
         binding.activeCallStatus.text = if (recording) "Connected" else "Connecting"
         if (callStartedAtMs == 0L) binding.callTimer.text = "00:00"
         updateActiveCallButtons()
+        // Foreground service keeps the call alive when app is backgrounded / screen locked.
+        // Android 14: starting a type=microphone FGS without RECORD_AUDIO permission
+        // throws SecurityException. Skip if we don't hold it.
+        if (hasRecordAudioPermission()) {
+            CallForegroundService.start(this, contactName(remoteId))
+        } else {
+            Log.w(TAG, "Skipping CallForegroundService.start — RECORD_AUDIO not granted")
+        }
     }
 
     private fun showOutgoingCallScreen(secondsLeft: Int = CALL_SETUP_TIMEOUT_SECONDS) {
@@ -1032,7 +1372,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun notifyIncomingMessage(senderId: String, text: String) {
         if (appInForeground || !hasNotificationPermission()) return
-        unreadNotificationCount += 1
+        // Single source of truth: SharedPreferences. The in-memory mirror
+        // diverged from the FCM-service-incremented value, causing wrong
+        // badge numbers on notifications.
+        val count = prefs.getInt(KEY_UNREAD_NOTIFICATION_COUNT, 0) + 1
+        prefs.edit().putInt(KEY_UNREAD_NOTIFICATION_COUNT, count).apply()
+        unreadNotificationCount = count
         val senderName = contactName(senderId)
         val notification = NotificationCompat.Builder(this, NOTIFICATION_MESSAGES_CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
@@ -1045,7 +1390,7 @@ class MainActivity : AppCompatActivity() {
             .setDefaults(NotificationCompat.DEFAULT_VIBRATE)
             .setSound(notificationSound(R.raw.incomming_masege))
             .setBadgeIconType(NotificationCompat.BADGE_ICON_SMALL)
-            .setNumber(unreadNotificationCount)
+            .setNumber(count)
             .setContentIntent(contentIntent())
             .setAutoCancel(true)
             .build()
@@ -1070,17 +1415,6 @@ class MainActivity : AppCompatActivity() {
         if (!firebaseReady) {
             binding.status.text = "Missing Firebase config"
         }
-    }
-
-    private fun applyVoiceModeFromRemote(mode: VoiceMode) {
-        if (mode == currentVoiceMode) return
-        if (recording) return
-
-        releaseSharedCodec()
-        currentVoiceMode = mode
-        mode.codec2Mode?.let { codec2 = Codec2Bridge(it) }
-
-        binding.status.text = "Incoming mode: ${mode.label}"
     }
 
     private fun updateModeSelectionFromRemote(mode: VoiceMode) {
@@ -1337,9 +1671,13 @@ class MainActivity : AppCompatActivity() {
                             }
 
                             override fun onSetFailure(error: String?) {
-                                updateDebugStatus("answer failed: $error")
+                                updateDebugStatus("answer set failed: $error")
                             }
                         }, desc)
+                    }
+
+                    override fun onCreateFailure(error: String?) {
+                        updateDebugStatus("create answer failed: $error")
                     }
                 }, MediaConstraints())
             }
@@ -1378,6 +1716,7 @@ class MainActivity : AppCompatActivity() {
             .putStringSet(KEY_CONTACT_IDS, savedContactIds() + id)
             .apply()
         renderContacts()
+        // Don't touch the banner here — updateAddContactBanner checks for a name, not just ID membership
     }
 
     private fun listenAnswer() {
@@ -1556,14 +1895,12 @@ class MainActivity : AppCompatActivity() {
                     "createdAt" to System.currentTimeMillis()
                 )
 
-                val cloudLineIndex = messageLogFor(targetId).toString().split('\n').count { it.isNotEmpty() }
                 firestore.collection("messages").document(id).set(message)
                     .addOnSuccessListener {
                         markMessageSeen(id)
-                        messageStatuses[id] = MsgStatus.SENT
-                        myMessageLines.getOrPut(targetId) { mutableListOf() }.add(cloudLineIndex to id)
+                        saveMessageStatus(id, MsgStatus.SENT)
                         binding.messageInput.text?.clear()
-                        appendMessage(targetId, "Me", text)
+                        appendMessage(targetId, "Me", text, id)  // msgId embedded in log line
                         runOnUiThread {
                             binding.btnSend.isEnabled = true
                             binding.status.text = "Encrypted sent to ${contactName(targetId)}"
@@ -1589,10 +1926,13 @@ class MainActivity : AppCompatActivity() {
     private fun startMessagePolling() {
         messagePollJob?.cancel()
         messagePollJob = ioScope.launch {
+            var tick = 0
             while (isActive) {
                 delay(MESSAGE_POLL_MS)
                 pollCloudMessages()
                 pollReceipts()
+                // Prune stale DELIVERED-only receipts once per hour (720 ticks @ 5s)
+                if (++tick % 720 == 0) pruneOldReceipts()
             }
         }
     }
@@ -1615,7 +1955,7 @@ class MainActivity : AppCompatActivity() {
         val id = document.id
         val senderId = document.getString("from") ?: return
         if (senderId == localId) return
-        val text = decryptCloudMessage(document) ?: return
+        val text = decryptCloudMessage(document)?.takeIf { it.isNotBlank() } ?: return
 
         val isNew = synchronized(receivedMessageIds) {
             receivedMessageIds.add(id)
@@ -1686,14 +2026,36 @@ class MainActivity : AppCompatActivity() {
             else -> return
         }
         // Only upgrade status, never downgrade
-        if (messageStatuses[msgId] != MsgStatus.READ) {
-            messageStatuses[msgId] = newStatus
+        if (getMessageStatus(msgId) != MsgStatus.READ) {
+            saveMessageStatus(msgId, newStatus)
             runOnUiThread { refreshChatDisplay(fromId) }
         }
-        // Delete receipt once READ is confirmed (no more updates needed)
+        // Delete receipt ONLY when READ is confirmed. Deleting on DELIVERED would
+        // prevent the receiver from later .update("read", true) — the update would
+        // hit a deleted doc and READ status would never propagate. Sender prunes
+        // stale DELIVERED-only receipts via a periodic GC pass (see pruneOldReceipts).
         if (isRead) {
             doc.reference.delete()
         }
+    }
+
+    /**
+     * Periodic GC: delete receipts older than 7 days whose READ has not been
+     * confirmed. Prevents the 50-doc poll limit from filling up with stale
+     * DELIVERED-only receipts when the peer never opens the chat.
+     */
+    private fun pruneOldReceipts() {
+        val firestore = db ?: return
+        val cutoff = System.currentTimeMillis() - 7L * 24L * 60L * 60L * 1000L
+        firestore.collection("receipts")
+            .whereEqualTo("to", localId)
+            .whereLessThan("createdAt", cutoff)
+            .limit(50)
+            .get()
+            .addOnSuccessListener { snap ->
+                snap.documents.forEach { it.reference.delete() }
+            }
+            .addOnFailureListener { e -> Log.w(TAG, "pruneOldReceipts failed: ${e.message}") }
     }
 
     private fun decryptCloudMessage(document: DocumentSnapshot): String? {
@@ -1702,75 +2064,71 @@ class MainActivity : AppCompatActivity() {
         val encryptedKey = document.getString("encryptedKey") ?: return null
         val iv = document.getString("iv") ?: return null
         val cipherText = document.getString("cipherText") ?: return null
-        val keyAlgorithm = document.getString("keyAlgorithm") ?: RSA_OAEP_SHA256
+        val keyAlgorithm = document.getString("keyAlgorithm") ?: EC_KEY_ALGORITHM
 
         return runCatching {
             decryptMessage(encryptedKey, iv, cipherText, keyAlgorithm)
         }.getOrElse { error ->
             updateDebugStatus("decrypt failed: ${error.message}")
-            deleteCloudMessage(document)
+            // Don't delete if keypair isn't loaded yet — transient, message still recoverable
+            if (error.message != "EC keypair not loaded") {
+                deleteCloudMessage(document)
+            }
             null
         }
     }
 
-    private fun encryptMessageFor(text: String, publicKeyB64: String): EncryptedMessage {
-        val keyFactory = KeyFactory.getInstance("RSA")
-        val publicKey = keyFactory.generatePublic(X509EncodedKeySpec(b64decode(publicKeyB64)))
+    /**
+     * ECIES: ephemeral ECDH key agreement + AES-256-GCM.
+     * encryptedKey field carries the ephemeral EC public key (X.509 DER, base64).
+     */
+    private fun encryptMessageFor(text: String, recipientPublicKeyB64: String): EncryptedMessage {
+        val kf = KeyFactory.getInstance("EC")
+        val recipientPublicKey = kf.generatePublic(X509EncodedKeySpec(b64decode(recipientPublicKeyB64)))
 
-        val aesGenerator = KeyGenerator.getInstance("AES")
-        aesGenerator.init(AES_KEY_BITS)
-        val aesKey = aesGenerator.generateKey()
+        // Ephemeral keypair — fresh random per message
+        val ephemKpg = KeyPairGenerator.getInstance("EC")
+        ephemKpg.initialize(ECGenParameterSpec("secp256r1"))
+        val ephemKp = ephemKpg.generateKeyPair()
+
+        // ECDH shared secret
+        val ka = KeyAgreement.getInstance("ECDH")
+        ka.init(ephemKp.private)
+        ka.doPhase(recipientPublicKey, true)
+        val aesKey = SecretKeySpec(sha256(ka.generateSecret()), "AES")
+
         val iv = ByteArray(AES_GCM_IV_BYTES).also { SecureRandom().nextBytes(it) }
+        val cipher = Cipher.getInstance(AES_MESSAGE_ALGORITHM)
+        cipher.init(Cipher.ENCRYPT_MODE, aesKey, GCMParameterSpec(AES_GCM_TAG_BITS, iv))
+        val cipherText = cipher.doFinal(text.toByteArray(Charsets.UTF_8))
 
-        val aesCipher = Cipher.getInstance(AES_MESSAGE_ALGORITHM)
-        aesCipher.init(Cipher.ENCRYPT_MODE, aesKey, GCMParameterSpec(AES_GCM_TAG_BITS, iv))
-        val cipherText = aesCipher.doFinal(text.toByteArray(Charsets.UTF_8))
-
-        val encryptedKey = rsaEncrypt(aesKey.encoded, publicKey)
         return EncryptedMessage(
-            encryptedKey = b64(encryptedKey.bytes),
+            encryptedKey = b64(ephemKp.public.encoded), // ephemeral EC public key
             iv = b64(iv),
             cipherText = b64(cipherText),
-            keyAlgorithm = encryptedKey.algorithm
+            keyAlgorithm = EC_KEY_ALGORITHM
         )
     }
 
+    /** ECIES decryption: ECDH with ephemeral public key from sender + AES-256-GCM. */
     private fun decryptMessage(
-        encryptedKeyB64: String,
+        encryptedKeyB64: String, // ephemeral EC public key (X.509 DER, base64)
         ivB64: String,
         cipherTextB64: String,
-        keyAlgorithm: String
+        @Suppress("UNUSED_PARAMETER") keyAlgorithm: String
     ): String {
-        val privateKey = localMessageKeyPair().private
-        val aesKeyBytes = rsaDecrypt(b64decode(encryptedKeyB64), privateKey, keyAlgorithm)
-        val aesKey = SecretKeySpec(aesKeyBytes, "AES")
-        val aesCipher = Cipher.getInstance(AES_MESSAGE_ALGORITHM)
-        aesCipher.init(
-            Cipher.DECRYPT_MODE,
-            aesKey,
-            GCMParameterSpec(AES_GCM_TAG_BITS, b64decode(ivB64))
-        )
-        return String(aesCipher.doFinal(b64decode(cipherTextB64)), Charsets.UTF_8)
-    }
+        val kp = myEcKeyPair ?: error("EC keypair not loaded")
+        val kf = KeyFactory.getInstance("EC")
+        val ephemPublicKey = kf.generatePublic(X509EncodedKeySpec(b64decode(encryptedKeyB64)))
 
-    private fun rsaEncrypt(bytes: ByteArray, publicKey: PublicKey): RsaCipherBytes {
-        val cipher = Cipher.getInstance(RSA_OAEP_SHA256)
-        cipher.init(Cipher.ENCRYPT_MODE, publicKey)
-        return RsaCipherBytes(cipher.doFinal(bytes), RSA_OAEP_SHA256)
-    }
+        val ka = KeyAgreement.getInstance("ECDH")
+        ka.init(kp.private)
+        ka.doPhase(ephemPublicKey, true)
+        val aesKey = SecretKeySpec(sha256(ka.generateSecret()), "AES")
 
-    private fun rsaDecrypt(bytes: ByteArray, privateKey: PrivateKey, keyAlgorithm: String): ByteArray {
-        val algorithms = listOf(keyAlgorithm, RSA_OAEP_SHA256, RSA_OAEP_SHA1).distinct()
-        algorithms.forEachIndexed { index, algorithm ->
-            runCatching {
-                val cipher = Cipher.getInstance(algorithm)
-                cipher.init(Cipher.DECRYPT_MODE, privateKey)
-                val result = cipher.doFinal(bytes)
-                if (index > 0) Log.w(TAG, "rsaDecrypt: fell back to $algorithm — message encrypted with old scheme")
-                return result
-            }
-        }
-        error("No RSA decryption provider")
+        val cipher = Cipher.getInstance(AES_MESSAGE_ALGORITHM)
+        cipher.init(Cipher.DECRYPT_MODE, aesKey, GCMParameterSpec(AES_GCM_TAG_BITS, b64decode(ivB64)))
+        return String(cipher.doFinal(b64decode(cipherTextB64)), Charsets.UTF_8)
     }
 
     private fun deleteCloudMessage(document: DocumentSnapshot) {
@@ -1798,40 +2156,18 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun sendChannelMessage() {
-        val text = binding.messageInput.text.toString().trim()
-        if (text.isEmpty()) return
-
-        if (messageChannel?.state() != DataChannel.State.OPEN) {
-            binding.status.text = "Message channel is not open"
-            return
-        }
-
-        val id = nextMessageId()
-        // Track line index BEFORE appending so we can match checkmark to this line
-        val lineIndex = messageLogFor(remoteId).toString().split('\n').count { it.isNotEmpty() }
-        messageStatuses[id] = MsgStatus.SENT
-        myMessageLines.getOrPut(remoteId) { mutableListOf() }.add(lineIndex to id)
-
-        synchronized(pendingMessages) { pendingMessages[id] = text }
-        sendTextPacket(id, text)
-        retryUntilAck(id)
-        binding.messageInput.text?.clear()
-        appendMessage(remoteId, "Me", text)
-    }
-
     private fun handleMessagePacket(packet: String) {
         val parts = packet.split("|", limit = 3)
         when (parts.firstOrNull()) {
             "ACK" -> {
                 val id = parts.getOrNull(1) ?: return
                 synchronized(pendingMessages) { pendingMessages.remove(id) }
-                messageStatuses[id] = MsgStatus.DELIVERED
+                saveMessageStatus(id, MsgStatus.DELIVERED)
                 runOnUiThread { refreshChatDisplay(remoteId) }
             }
             "READ" -> {
                 val id = parts.getOrNull(1) ?: return
-                messageStatuses[id] = MsgStatus.READ
+                saveMessageStatus(id, MsgStatus.READ)
                 runOnUiThread { refreshChatDisplay(remoteId) }
             }
             "TXT" -> {
@@ -1871,49 +2207,23 @@ class MainActivity : AppCompatActivity() {
         sendMessagePacket("READ|$id|")
     }
 
-    /**
-     * Build a SpannableStringBuilder for [lines] (already filtered, non-empty).
-     * [fromLine] = absolute line index of lines[0] in the full chat log.
-     * My outgoing messages get a colored checkmark appended based on MsgStatus.
-     */
-    private fun buildChatSpannable(
-        chatId: String,
-        lines: List<String>,
-        fromLine: Int = 0
-    ): SpannableStringBuilder {
-        val gray = 0xFF888888.toInt()
-        val blue = 0xFF2196F3.toInt()
-        val lineToMsgId = myMessageLines[chatId]
-            ?.associate { (idx, id) -> idx to id }
-            ?: emptyMap()
-        val sb = SpannableStringBuilder()
-        lines.forEachIndexed { localIdx, line ->
-            sb.append(line)
-            val msgId = lineToMsgId[fromLine + localIdx]
-            if (msgId != null) {
-                val (mark, color) = when (messageStatuses[msgId] ?: MsgStatus.SENT) {
-                    MsgStatus.SENT      -> " ✓"  to gray
-                    MsgStatus.DELIVERED -> " ✓✓" to gray
-                    MsgStatus.READ      -> " ✓"  to blue
-                }
-                val start = sb.length
-                sb.append(mark)
-                sb.setSpan(ForegroundColorSpan(color), start, sb.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
-            }
-            sb.append('\n')
-        }
-        return sb
-    }
-
-    /** Rebuild chat TextViews from scratch — called when statuses change. */
+    /** Rebuild chat bubbles — debounced 150ms to batch rapid status-tick updates. */
     private fun refreshChatDisplay(chatId: String) {
         if (binding.chatScreen.visibility != View.VISIBLE || chatId != remoteId) return
-        val lines = messageLogFor(chatId).toString().split('\n').filter { it.isNotEmpty() }
-        if (chatDividerLineIndex >= 0) {
-            binding.messages.text = buildChatSpannable(chatId, lines.take(chatDividerLineIndex), 0)
-            binding.newMessagesText.text = buildChatSpannable(chatId, lines.drop(chatDividerLineIndex), chatDividerLineIndex)
-        } else {
-            binding.messages.text = buildChatSpannable(chatId, lines, 0)
+        pendingRefreshJob?.cancel()
+        pendingRefreshJob = ioScope.launch {
+            delay(150)
+            withContext(Dispatchers.Main) {
+                if (binding.chatScreen.visibility != View.VISIBLE || chatId != remoteId) return@withContext
+                val allLines = splitLogLines(messageLogFor(chatId).toString())
+                val query = chatSearchQuery
+                val lines = if (query.isBlank()) allLines
+                            else allLines.filter { line ->
+                                val (_, text) = parseLineAuthorText(line)
+                                text.contains(query, ignoreCase = true)
+                            }
+                renderChatMessages(chatId, lines, if (query.isBlank()) chatDividerLineIndex else -1)
+            }
         }
     }
 
@@ -1953,24 +2263,27 @@ class MainActivity : AppCompatActivity() {
         return "$localId-${System.currentTimeMillis()}-$seq"
     }
 
-    private fun appendMessage(chatId: String, author: String, text: String) {
+    private fun appendMessage(chatId: String, author: String, text: String, msgId: String? = null) {
         val update = {
             val log = messageLogFor(chatId)
-            log.append(author).append(": ").append(text).append('\n')
+            // Embed msgId in author field for outgoing messages: "Me|{msgId}: text\t{ts}"
+            // This allows status lookup without fragile line-index matching.
+            val authorField = if (msgId != null && author == "Me") "Me|$msgId" else author
+            // Escape real newlines in text so multi-line messages occupy exactly one log entry.
+            //   (Unicode Line Separator) is visually invisible in normal text but safe here.
+            val safeText = text.replace('\n', ' ')
+            log.append(authorField).append(": ").append(safeText).append('\t').append(System.currentTimeMillis()).append('\n')
             prefs.edit().putString(chatLogKey(chatId), log.toString()).apply()
             if (binding.chatScreen.visibility == View.VISIBLE && chatId == remoteId) {
-                // Mark as read — user is actively in the chat
-                val lines = log.toString().split('\n').filter { it.isNotEmpty() }
+                val lines = splitLogLines(log.toString())
                 prefs.edit().putInt("$KEY_CHAT_READ_PREFIX$chatId", lines.size).apply()
-
-                if (chatDividerLineIndex >= 0) {
-                    // Divider visible — update only the new-messages section (below divider)
-                    binding.newMessagesText.text = buildChatSpannable(chatId, lines.drop(chatDividerLineIndex), chatDividerLineIndex)
-                    binding.newMessagesText.visibility = View.VISIBLE
-                } else {
-                    binding.messages.text = buildChatSpannable(chatId, lines, 0)
-                }
+                renderChatMessages(chatId, lines, chatDividerLineIndex)
                 binding.messagesScroll.post { binding.messagesScroll.fullScroll(View.FOCUS_DOWN) }
+            }
+            updateUnreadBadge()
+            // If user is on the contacts list, refresh it live so blue dots update immediately
+            if (binding.contactListScreen.visibility == View.VISIBLE) {
+                renderContacts()
             }
         }
         if (Thread.currentThread() == mainLooper.thread) {
@@ -1978,6 +2291,649 @@ class MainActivity : AppCompatActivity() {
         } else {
             runOnUiThread(update)
         }
+    }
+
+    // ─── Chat bubble rendering ────────────────────────────────────────────────
+
+    private var chatDividerView: View? = null
+    private var pendingRefreshJob: Job? = null
+
+    /**
+     * Split a raw log string into individual message entries.
+     * Uses the structural boundary "\t{digits}\n" instead of bare "\n" so that
+     * multi-line message texts (containing real newlines) are never split into
+     * separate entries — which would cause the continuation parts to render on
+     * the wrong (incoming) side.
+     * Falls back to bare-newline split for legacy entries that lack a timestamp.
+     */
+    private fun splitLogLines(log: String): List<String> {
+        if (log.isEmpty()) return emptyList()
+        val result = mutableListOf<String>()
+        val re = Regex("""\t\d{10,}\n""")
+        var pos = 0
+        for (m in re.findAll(log)) {
+            val end = m.range.last + 1        // include the trailing \n
+            val entry = log.substring(pos, end).trimEnd('\n')
+            if (entry.isNotEmpty()) result.add(entry)
+            pos = end
+        }
+        // Legacy entries without timestamp that might remain after pos
+        if (pos < log.length) {
+            log.substring(pos).split('\n').filter { it.isNotEmpty() }.forEach { result.add(it) }
+        }
+        return result
+    }
+
+    private fun lineText(line: String): String {
+        val tab = line.lastIndexOf('\t')
+        return if (tab >= 0) line.substring(0, tab) else line
+    }
+
+    private fun lineTimestamp(line: String): Long {
+        val tab = line.lastIndexOf('\t')
+        if (tab < 0) return 0L
+        return line.substring(tab + 1).toLongOrNull() ?: 0L
+    }
+
+    /** Extract msgId embedded in outgoing log lines: "Me|{msgId}: text" → msgId, or null for old format. */
+    private fun lineMsgId(line: String): String? {
+        val text = lineText(line)
+        if (!text.startsWith("Me|")) return null
+        val sep = text.indexOf(": ")
+        return if (sep > 3) text.substring(3, sep) else null
+    }
+
+    /**
+     * Persist msgId→status to SharedPreferences AND update in-memory map.
+     * Use this instead of direct messageStatuses[id] = ... assignment.
+     */
+    private fun saveMessageStatus(msgId: String, status: MsgStatus) {
+        messageStatuses[msgId] = status
+        prefs.edit().putString("mst_$msgId", status.name).apply()
+    }
+
+    /**
+     * Look up status for msgId: in-memory first, then SharedPreferences (lazy load).
+     * Returns null only if msgId has no status recorded anywhere.
+     */
+    private fun getMessageStatus(msgId: String): MsgStatus? {
+        messageStatuses[msgId]?.let { return it }
+        val stored = prefs.getString("mst_$msgId", null) ?: return null
+        val status = runCatching { MsgStatus.valueOf(stored) }.getOrNull() ?: return null
+        messageStatuses[msgId] = status  // cache for this session
+        return status
+    }
+
+    private fun parseLineAuthorText(line: String): Pair<String, String> {
+        val text = lineText(line)
+        // New format: "Me|{msgId}: text" — strip msgId from author
+        if (text.startsWith("Me|")) {
+            val sep = text.indexOf(": ")
+            return if (sep >= 0) "Me" to text.substring(sep + 2) else "Me" to text
+        }
+        // Legacy format: "Me: text"
+        if (text.startsWith("Me: ")) return "Me" to text.removePrefix("Me: ")
+        val ci = text.indexOf(": ")
+        return if (ci >= 0) text.substring(0, ci) to text.substring(ci + 2)
+        else "" to text
+    }
+
+    private fun formatMessageTime(epochMs: Long): String {
+        if (epochMs == 0L) return ""
+        val cal = java.util.Calendar.getInstance()
+        cal.timeInMillis = epochMs
+        return "%02d:%02d".format(
+            cal.get(java.util.Calendar.HOUR_OF_DAY),
+            cal.get(java.util.Calendar.MINUTE)
+        )
+    }
+
+    private fun renderChatMessages(chatId: String, lines: List<String>, dividerAt: Int) {
+        binding.messagesContainer.removeAllViews()
+        chatDividerView = null
+        if (lines.isEmpty()) return
+
+        val timestamps = lines.map { lineTimestamp(it) }
+        // Determine which lines show timestamp: last in each consecutive same-minute group
+        val showTime = Array<String?>(lines.size) { null }
+        for (i in lines.indices) {
+            val ts = timestamps[i]
+            if (ts == 0L) continue
+            val nextTs = timestamps.getOrElse(i + 1) { 0L }
+            val thisMin = ts / 60_000
+            val nextMin = if (nextTs != 0L) nextTs / 60_000 else -1L
+            if (thisMin != nextMin) showTime[i] = formatMessageTime(ts)
+        }
+
+        lines.forEachIndexed { i, line ->
+            if (i == dividerAt && dividerAt >= 0) {
+                val dv = createMsgDividerView()
+                chatDividerView = dv
+                binding.messagesContainer.addView(dv)
+            }
+            val (author, text) = parseLineAuthorText(line)
+            val isOutgoing = author == "Me"
+            val ts = showTime[i]
+            val status: MsgStatus? = if (isOutgoing) {
+                // Prefer msgId embedded in log line (new format: "Me|{msgId}: ...")
+                val embeddedId = lineMsgId(line)
+                if (embeddedId != null) {
+                    getMessageStatus(embeddedId) ?: MsgStatus.SENT  // at minimum show ✓
+                } else {
+                    // Legacy log line without embedded msgId — no status tracking possible
+                    MsgStatus.SENT
+                }
+            } else null
+
+            val lineTs = lineTimestamp(line)
+            val onLongClick: () -> Unit = { showMessageContextMenu(chatId, lineTs, text, isOutgoing) }
+            binding.messagesContainer.addView(
+                if (text.startsWith("[PHOTO:") && text.endsWith("]")) {
+                    createPhotoBubble(text.removePrefix("[PHOTO:").removeSuffix("]"), isOutgoing, ts, onLongClick)
+                } else {
+                    createTextBubble(text, isOutgoing, ts, status, onLongClick)
+                }
+            )
+        }
+    }
+
+    private fun createTextBubble(text: String, isOutgoing: Boolean, time: String?, status: MsgStatus?,
+                                  onLongClick: (() -> Unit)? = null): android.view.View {
+        val dp = resources.displayMetrics.density
+
+        val ssb = android.text.SpannableStringBuilder(text)
+        if (status != null) {
+            val gray = 0xFF888888.toInt()
+            val blue = 0xFF2196F3.toInt()
+            val (mark, color) = when (status) {
+                MsgStatus.SENT      -> " ✓"  to gray
+                MsgStatus.DELIVERED -> " ✓✓" to gray
+                MsgStatus.READ      -> " ✓✓" to blue
+            }
+            val start = ssb.length
+            ssb.append(mark)
+            ssb.setSpan(android.text.style.ForegroundColorSpan(color), start, ssb.length, android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+
+        val bubbleLayout = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            background = ContextCompat.getDrawable(
+                this@MainActivity,
+                if (isOutgoing) R.drawable.bg_bubble_out else R.drawable.bg_bubble_in
+            )
+            val pad = (12 * dp).toInt()
+            val padV = (8 * dp).toInt()
+            setPadding(pad, padV, pad, padV)
+
+            addView(android.widget.TextView(this@MainActivity).apply {
+                setText(ssb, android.widget.TextView.BufferType.SPANNABLE)
+                textSize = 15f
+                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_primary))
+            })
+            if (time != null) {
+                addView(android.widget.TextView(this@MainActivity).apply {
+                    this.text = time
+                    textSize = 10f
+                    setTextColor(0xFF666666.toInt())
+                    gravity = android.view.Gravity.END
+                    setPadding(0, (2 * dp).toInt(), 0, 0)
+                })
+            }
+            if (onLongClick != null) {
+                isLongClickable = true
+                setOnLongClickListener { onLongClick(); true }
+            }
+        }
+
+        return android.widget.FrameLayout(this).apply {
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = (3 * dp).toInt()
+                bottomMargin = (3 * dp).toInt()
+            }
+            addView(bubbleLayout, android.widget.FrameLayout.LayoutParams(
+                android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
+                android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                gravity = if (isOutgoing) android.view.Gravity.END else android.view.Gravity.START
+                leftMargin = if (!isOutgoing) (12 * dp).toInt() else (52 * dp).toInt()
+                rightMargin = if (isOutgoing) (12 * dp).toInt() else (52 * dp).toInt()
+            })
+        }
+    }
+
+    private fun createPhotoBubble(path: String, isOutgoing: Boolean, time: String?,
+                                   onLongClick: (() -> Unit)? = null): android.view.View {
+        val dp = resources.displayMetrics.density
+        val maxPx = (220 * dp).toInt()
+        val file = java.io.File(path)
+
+        // File missing — show placeholder text bubble instead of empty photo bubble
+        if (!file.exists()) {
+            return createTextBubble("📷 Photo unavailable", isOutgoing, time, null, onLongClick)
+        }
+
+        val imgView = android.widget.ImageView(this).apply {
+            val opts = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            android.graphics.BitmapFactory.decodeFile(path, opts)
+            val sample = maxOf(1, opts.outWidth / maxPx)
+            val bmp = android.graphics.BitmapFactory.decodeFile(
+                path, android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
+            )
+            setImageBitmap(bmp)
+            scaleType = android.widget.ImageView.ScaleType.FIT_START
+            adjustViewBounds = true
+            maxWidth = maxPx
+            setOnClickListener { showFullScreenPhoto(path) }
+        }
+
+        val bubbleLayout = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            background = ContextCompat.getDrawable(
+                this@MainActivity,
+                if (isOutgoing) R.drawable.bg_bubble_out else R.drawable.bg_bubble_in
+            )
+            val pad = (6 * dp).toInt()
+            setPadding(pad, pad, pad, pad)
+            addView(imgView)
+            if (time != null) {
+                addView(android.widget.TextView(this@MainActivity).apply {
+                    this.text = time
+                    textSize = 10f
+                    setTextColor(0xFF666666.toInt())
+                    gravity = android.view.Gravity.END
+                    setPadding(0, (2 * dp).toInt(), 0, 0)
+                })
+            }
+            if (onLongClick != null) {
+                isLongClickable = true
+                setOnLongClickListener { onLongClick(); true }
+            }
+        }
+
+        return android.widget.FrameLayout(this).apply {
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = (3 * dp).toInt()
+                bottomMargin = (3 * dp).toInt()
+            }
+            addView(bubbleLayout, android.widget.FrameLayout.LayoutParams(
+                android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
+                android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                gravity = if (isOutgoing) android.view.Gravity.END else android.view.Gravity.START
+                leftMargin = if (!isOutgoing) (12 * dp).toInt() else (52 * dp).toInt()
+                rightMargin = if (isOutgoing) (12 * dp).toInt() else (52 * dp).toInt()
+            })
+        }
+    }
+
+    private fun createMsgDividerView(): android.view.View {
+        val dp = resources.displayMetrics.density
+        return android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = (10 * dp).toInt()
+                bottomMargin = (10 * dp).toInt()
+            }
+            addView(android.view.View(this@MainActivity).apply {
+                layoutParams = android.widget.LinearLayout.LayoutParams(0, (1 * dp).toInt(), 1f).apply {
+                    rightMargin = (8 * dp).toInt()
+                }
+                setBackgroundColor(0xFF555555.toInt())
+                alpha = 0.5f
+            })
+            addView(android.widget.TextView(this@MainActivity).apply {
+                text = "New messages"
+                textSize = 11f
+                setTextColor(0xFF888888.toInt())
+            })
+            addView(android.view.View(this@MainActivity).apply {
+                layoutParams = android.widget.LinearLayout.LayoutParams(0, (1 * dp).toInt(), 1f).apply {
+                    leftMargin = (8 * dp).toInt()
+                }
+                setBackgroundColor(0xFF555555.toInt())
+                alpha = 0.5f
+            })
+        }
+    }
+
+    // ─── End Chat bubble rendering ────────────────────────────────────────────
+
+    // ─── Contact context menu (long-press) ───────────────────────────────────
+
+    private fun showContactContextMenu(id: String) {
+        AlertDialog.Builder(this)
+            .setTitle(contactName(id))
+            .setItems(arrayOf("Edit name", "Delete contact")) { _, which ->
+                when (which) {
+                    0 -> showRenameContactDialog(id)
+                    1 -> showDeleteContactDialog(id)
+                }
+            }
+            .show()
+    }
+
+    private fun showRenameContactDialog(id: String) {
+        val input = EditText(this).apply {
+            setText(contactName(id))
+            selectAll()
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS
+            setPadding(
+                (24 * resources.displayMetrics.density).toInt(), 0,
+                (24 * resources.displayMetrics.density).toInt(), 0
+            )
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Rename contact")
+            .setView(input)
+            .setPositiveButton("Save") { _, _ ->
+                val newName = input.text.toString().trim()
+                if (newName.isNotBlank()) {
+                    prefs.edit().putString("$KEY_CONTACT_PREFIX$id", newName).apply()
+                    renderContacts()
+                    if (remoteId == id) binding.chatTitle.text = newName
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+        input.post {
+            input.requestFocus()
+            val imm = getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
+            imm.showSoftInput(input, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+        }
+    }
+
+    private fun showDeleteContactDialog(id: String) {
+        AlertDialog.Builder(this)
+            .setTitle("Delete contact")
+            .setMessage("Remove \"${contactName(id)}\" and all messages?")
+            .setPositiveButton("Delete") { _, _ -> deleteContact(id) }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun deleteContact(id: String) {
+        val newSet = savedContactIds().toMutableSet().apply { remove(id) }
+        prefs.edit()
+            .putStringSet(KEY_CONTACT_IDS, newSet)
+            .remove("$KEY_CONTACT_PREFIX$id")
+            .remove("$KEY_CHAT_LOG_PREFIX$id")
+            .remove("$KEY_CHAT_READ_PREFIX$id")
+            .apply()
+        messageLogs.remove(id)
+        if (remoteId == id) {
+            remoteId = ""
+            showContactList()
+        } else {
+            renderContacts()
+        }
+    }
+
+    // ─── Message context menu (long-press) ───────────────────────────────────
+
+    private fun showMessageContextMenu(chatId: String, lineTs: Long, text: String, @Suppress("UNUSED_PARAMETER") isOutgoing: Boolean) {
+        // When search is active, show only Copy (delete index is ambiguous with filtered view)
+        val items = if (chatSearchQuery.isBlank()) arrayOf("Copy text", "Delete message") else arrayOf("Copy text")
+        AlertDialog.Builder(this)
+            .setItems(items) { _, which ->
+                when (which) {
+                    0 -> {
+                        val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                        cm.setPrimaryClip(android.content.ClipData.newPlainText("message", text))
+                        Toast.makeText(this, "Copied", Toast.LENGTH_SHORT).show()
+                    }
+                    1 -> AlertDialog.Builder(this)
+                        .setMessage("Delete this message?")
+                        .setPositiveButton("Delete") { _, _ -> deleteMessageAt(chatId, lineTs) }
+                        .setNegativeButton("Cancel", null)
+                        .show()
+                }
+            }
+            .show()
+    }
+
+    private fun deleteMessageAt(chatId: String, lineTs: Long) {
+        val allLines = splitLogLines(messageLogFor(chatId).toString()).toMutableList()
+        val idx = allLines.indexOfFirst { lineTimestamp(it) == lineTs }
+        if (idx < 0) return
+        allLines.removeAt(idx)
+        val newLog = allLines.joinToString("") { "$it\n" }
+        messageLogs[chatId] = StringBuilder(newLog)
+        prefs.edit()
+            .putString(chatLogKey(chatId), newLog)
+            .putInt("$KEY_CHAT_READ_PREFIX$chatId", allLines.size)
+            .apply()
+        refreshChatDisplay(chatId)
+    }
+
+    // ─── App lock (PIN / biometric) ──────────────────────────────────────────
+
+    private fun checkAndShowLockScreen() {
+        val lockEnabled = prefs.getBoolean(KEY_APP_LOCK_ENABLED, false)
+        val pinSet = prefs.getString(KEY_APP_PIN_HASH, null) != null
+        val loggedIn = localId.isNotBlank()
+        // Lock applies during active calls too — previously this carveout
+        // let an attacker who triggered a fake incoming call bypass the lock.
+        // The call screen survives the lock overlay (FGS notification still
+        // works) so user can still End call from the lock screen via Back.
+        if (lockEnabled && pinSet && loggedIn && !appUnlocked) {
+            showLockScreen()
+        }
+    }
+
+    private fun showLockScreen() {
+        binding.drawerLayout.setDrawerLockMode(DrawerLayout.LOCK_MODE_LOCKED_CLOSED)
+        binding.lockScreen.visibility = View.VISIBLE
+        binding.lockStatus.text = "Enter PIN to unlock"
+        binding.pinInput.text?.clear()
+        binding.pinInput.requestFocus()
+        // Show biometric button only if hardware available
+        val bm = BiometricManager.from(this)
+        val canUseBiometric = bm.canAuthenticate(
+            BiometricManager.Authenticators.BIOMETRIC_STRONG or
+            BiometricManager.Authenticators.BIOMETRIC_WEAK
+        ) == BiometricManager.BIOMETRIC_SUCCESS
+        binding.btnUseBiometric.visibility = if (canUseBiometric) View.VISIBLE else View.GONE
+        // Auto-trigger biometric prompt if available
+        if (canUseBiometric) showBiometricPrompt()
+    }
+
+    private fun hideLockScreen() {
+        appUnlocked = true
+        binding.lockScreen.visibility = View.GONE
+        binding.drawerLayout.setDrawerLockMode(DrawerLayout.LOCK_MODE_UNLOCKED)
+    }
+
+    private fun attemptPinUnlock(pin: String) {
+        if (pin.isBlank()) {
+            binding.lockStatus.text = "Enter your PIN"
+            return
+        }
+        // Rate-limit: backoff after repeated failures so brute-force is impractical.
+        val failures = prefs.getInt(KEY_PIN_FAILURES, 0)
+        val lockoutUntil = prefs.getLong(KEY_PIN_LOCKOUT_UNTIL, 0L)
+        val nowMs = System.currentTimeMillis()
+        if (nowMs < lockoutUntil) {
+            val secsLeft = ((lockoutUntil - nowMs) / 1000).coerceAtLeast(1)
+            binding.lockStatus.text = "Too many attempts — wait ${secsLeft}s"
+            return
+        }
+
+        val storedHash = prefs.getString(KEY_APP_PIN_HASH, null)
+        val storedSalt = prefs.getString(KEY_APP_PIN_SALT, null)
+        if (storedHash == null || storedSalt == null) { hideLockScreen(); return }
+
+        val enteredHash = hashPin(pin, b64decode(storedSalt))
+        if (enteredHash == storedHash) {
+            prefs.edit()
+                .putInt(KEY_PIN_FAILURES, 0)
+                .putLong(KEY_PIN_LOCKOUT_UNTIL, 0L)
+                .apply()
+            hideLockScreen()
+        } else {
+            val newFailures = failures + 1
+            val edit = prefs.edit().putInt(KEY_PIN_FAILURES, newFailures)
+            // Exponential backoff after 3 failures: 30s, 60s, 120s, 240s, ...
+            // After 10 failures total: clear PIN and force re-setup (no auto-wipe of data).
+            if (newFailures >= 10) {
+                edit.putBoolean(KEY_APP_LOCK_ENABLED, false)
+                    .remove(KEY_APP_PIN_HASH)
+                    .remove(KEY_APP_PIN_SALT)
+                    .putInt(KEY_PIN_FAILURES, 0)
+                    .putLong(KEY_PIN_LOCKOUT_UNTIL, 0L)
+                    .apply()
+                Toast.makeText(this, "Too many failed attempts — app lock disabled. Re-enable from settings.", Toast.LENGTH_LONG).show()
+                hideLockScreen()
+                return
+            }
+            if (newFailures >= 3) {
+                val backoffMs = 30_000L * (1L shl (newFailures - 3).coerceAtMost(6))
+                edit.putLong(KEY_PIN_LOCKOUT_UNTIL, nowMs + backoffMs)
+            }
+            edit.apply()
+            binding.lockStatus.text = "Wrong PIN ($newFailures/10)"
+            binding.pinInput.text?.clear()
+        }
+    }
+
+    private fun showBiometricPrompt() {
+        val executor = ContextCompat.getMainExecutor(this)
+        val callback = object : BiometricPrompt.AuthenticationCallback() {
+            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                runOnUiThread { hideLockScreen() }
+            }
+            override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                runOnUiThread { binding.lockStatus.text = "Biometric error — use PIN" }
+            }
+            override fun onAuthenticationFailed() {
+                runOnUiThread { binding.lockStatus.text = "Not recognized — try again" }
+            }
+        }
+        val prompt = BiometricPrompt(this, executor, callback)
+        val info = BiometricPrompt.PromptInfo.Builder()
+            .setTitle("X-link")
+            .setSubtitle("Unlock app")
+            .setNegativeButtonText("Use PIN")
+            .build()
+        prompt.authenticate(info)
+    }
+
+    private fun showAppLockSettings() {
+        val lockEnabled = prefs.getBoolean(KEY_APP_LOCK_ENABLED, false)
+        if (!lockEnabled) {
+            // Enable lock: prompt to set PIN first
+            showSetPinDialog { pin ->
+                val salt = ByteArray(16).also { SecureRandom().nextBytes(it) }
+                prefs.edit()
+                    .putString(KEY_APP_PIN_HASH, hashPin(pin, salt))
+                    .putString(KEY_APP_PIN_SALT, Base64.encodeToString(salt, Base64.NO_WRAP))
+                    .putBoolean(KEY_APP_LOCK_ENABLED, true)
+                    .putInt(KEY_PIN_FAILURES, 0)
+                    .putLong(KEY_PIN_LOCKOUT_UNTIL, 0L)
+                    .apply()
+                appUnlocked = true
+                updateAppLockButton()
+                Toast.makeText(this, "App lock enabled", Toast.LENGTH_SHORT).show()
+            }
+        } else {
+            // Already enabled — offer to disable or change PIN
+            val items = arrayOf("Change PIN", "Disable app lock")
+            AlertDialog.Builder(this)
+                .setTitle("App lock")
+                .setItems(items) { _, which ->
+                    when (which) {
+                        0 -> showSetPinDialog { pin ->
+                            val salt = ByteArray(16).also { SecureRandom().nextBytes(it) }
+                            prefs.edit()
+                                .putString(KEY_APP_PIN_HASH, hashPin(pin, salt))
+                                .putString(KEY_APP_PIN_SALT, Base64.encodeToString(salt, Base64.NO_WRAP))
+                                .putInt(KEY_PIN_FAILURES, 0)
+                                .putLong(KEY_PIN_LOCKOUT_UNTIL, 0L)
+                                .apply()
+                            Toast.makeText(this, "PIN updated", Toast.LENGTH_SHORT).show()
+                        }
+                        1 -> {
+                            prefs.edit()
+                                .putBoolean(KEY_APP_LOCK_ENABLED, false)
+                                .remove(KEY_APP_PIN_HASH)
+                                .remove(KEY_APP_PIN_SALT)
+                                .remove(KEY_PIN_FAILURES)
+                                .remove(KEY_PIN_LOCKOUT_UNTIL)
+                                .apply()
+                            appUnlocked = false
+                            updateAppLockButton()
+                            Toast.makeText(this, "App lock disabled", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+                .show()
+        }
+    }
+
+    private fun showSetPinDialog(onPinConfirmed: (String) -> Unit) {
+        val dp = resources.displayMetrics.density
+        val container = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding((24 * dp).toInt(), (8 * dp).toInt(), (24 * dp).toInt(), 0)
+        }
+        val pin1 = EditText(this).apply {
+            hint = "Enter new PIN (4–8 digits)"
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_VARIATION_PASSWORD
+            maxLines = 1
+        }
+        val pin2 = EditText(this).apply {
+            hint = "Confirm PIN"
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_VARIATION_PASSWORD
+            maxLines = 1
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = (8 * dp).toInt() }
+        }
+        container.addView(pin1)
+        container.addView(pin2)
+        AlertDialog.Builder(this)
+            .setTitle("Set PIN")
+            .setView(container)
+            .setPositiveButton("Set") { _, _ ->
+                val p1 = pin1.text.toString()
+                val p2 = pin2.text.toString()
+                when {
+                    p1.length < 4 -> Toast.makeText(this, "PIN must be at least 4 digits", Toast.LENGTH_SHORT).show()
+                    p1 != p2 -> Toast.makeText(this, "PINs don't match", Toast.LENGTH_SHORT).show()
+                    else -> onPinConfirmed(p1)
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun updateAppLockButton() {
+        val lockEnabled = prefs.getBoolean(KEY_APP_LOCK_ENABLED, false)
+        binding.btnAppLock.text = if (lockEnabled) "App lock: ON" else "App lock: OFF"
+    }
+
+    /**
+     * PBKDF2-SHA256 with 600,000 iterations and a per-user random 16-byte salt.
+     * OWASP 2023 recommendation. Replaces the previous single-SHA256 hash with
+     * a hardcoded "salt" constant — that was crackable in <1 second on a GPU.
+     */
+    private fun hashPin(pin: String, salt: ByteArray): String {
+        val spec = javax.crypto.spec.PBEKeySpec(
+            pin.toCharArray(), salt, 600_000, 256
+        )
+        val skf = javax.crypto.SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+        val bytes = skf.generateSecret(spec).encoded
+        return Base64.encodeToString(bytes, Base64.NO_WRAP)
     }
 
     // ─── Backup / Restore ────────────────────────────────────────────────────
@@ -2106,6 +3062,925 @@ class MainActivity : AppCompatActivity() {
 
     // ─── End Backup / Restore ────────────────────────────────────────────────
 
+    // ─── In-app update ───────────────────────────────────────────────────────
+
+    private data class ReleaseInfo(
+        val tagName: String,
+        val apkUrl: String,
+        val releaseNotes: String
+    )
+
+    /** Fetch latest stable release. Returns null if repo not configured. */
+    private fun fetchLatestRelease(): ReleaseInfo? {
+        if (GITHUB_OWNER.isBlank() || GITHUB_REPO.isBlank()) return null
+        val conn = URL(GITHUB_API).openConnection() as HttpURLConnection
+        return try {
+            conn.apply {
+                requestMethod = "GET"
+                setRequestProperty("Accept", "application/vnd.github.v3+json")
+                setRequestProperty("User-Agent", "XxxLink-UpdateChecker")
+                connectTimeout = 10_000; readTimeout = 10_000
+            }
+            val body = conn.inputStream.bufferedReader().use { it.readText() }
+            parseRelease(org.json.JSONObject(body))
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    /**
+     * Fetch latest prerelease (beta) from the releases list.
+     * Returns null if none found or repo not configured.
+     */
+    private fun fetchLatestPrerelease(): ReleaseInfo? {
+        if (GITHUB_OWNER.isBlank() || GITHUB_REPO.isBlank()) return null
+        val listUrl = "https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/releases?per_page=10"
+        val conn = URL(listUrl).openConnection() as HttpURLConnection
+        return try {
+            conn.apply {
+                requestMethod = "GET"
+                setRequestProperty("Accept", "application/vnd.github.v3+json")
+                setRequestProperty("User-Agent", "XxxLink-UpdateChecker")
+                connectTimeout = 10_000; readTimeout = 10_000
+            }
+            val body = conn.inputStream.bufferedReader().use { it.readText() }
+            val arr = org.json.JSONArray(body)
+            var result: ReleaseInfo? = null
+            for (i in 0 until arr.length()) {
+                val obj = arr.getJSONObject(i)
+                if (obj.optBoolean("prerelease", false)) {
+                    result = parseRelease(obj)
+                    break
+                }
+            }
+            result
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    private fun parseRelease(json: org.json.JSONObject): ReleaseInfo {
+        val tag    = json.getString("tag_name")
+        val notes  = json.optString("body", "").take(300)
+        val assets = json.getJSONArray("assets")
+        var apkUrl = ""
+        for (i in 0 until assets.length()) {
+            val a = assets.getJSONObject(i)
+            if (a.getString("name").endsWith(".apk", ignoreCase = true)) {
+                apkUrl = a.getString("browser_download_url"); break
+            }
+        }
+        if (apkUrl.isBlank()) error("No APK asset in release $tag")
+        return ReleaseInfo(tag, apkUrl, notes)
+    }
+
+    /** Returns true if `latest` version string is newer than `current`. */
+    private fun isNewerVersion(latest: String, current: String): Boolean {
+        // Split on both "." and "-" so "v1.3-beta.1" → [1,3,1] instead of [1,1] (which "3-beta" skips)
+        val normalize = { v: String -> v.trimStart('v').split(Regex("[.\\-]")).mapNotNull { it.toIntOrNull() } }
+        val l = normalize(latest);  val c = normalize(current)
+        for (i in 0 until maxOf(l.size, c.size)) {
+            val lv = l.getOrElse(i) { 0 };  val cv = c.getOrElse(i) { 0 }
+            if (lv > cv) return true
+            if (lv < cv) return false
+        }
+        return false
+    }
+
+    /** Check GitHub for a newer release; show dialog if found. */
+    private fun checkForUpdates(fromUser: Boolean = true) {
+        if (GITHUB_OWNER.isBlank() || GITHUB_REPO.isBlank()) {
+            if (fromUser) Toast.makeText(this,
+                "GitHub repo not configured (GITHUB_OWNER / GITHUB_REPO)", Toast.LENGTH_LONG).show()
+            return
+        }
+        ioScope.launch {
+            val info = runCatching { fetchLatestRelease() }.getOrElse { e ->
+                if (fromUser) runOnUiThread {
+                    Toast.makeText(this@MainActivity,
+                        "Update check failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+                return@launch
+            } ?: return@launch
+            val current = BuildConfig.VERSION_NAME
+            if (!isNewerVersion(info.tagName, current)) {
+                if (fromUser) runOnUiThread {
+                    Toast.makeText(this@MainActivity,
+                        "Up to date (v$current)", Toast.LENGTH_SHORT).show()
+                }
+                return@launch
+            }
+            runOnUiThread { showUpdateDialog(info, current) }
+        }
+    }
+
+    /** Check GitHub for a newer prerelease (beta); show dialog if found. */
+    private fun checkForBeta() {
+        if (GITHUB_OWNER.isBlank() || GITHUB_REPO.isBlank()) {
+            Toast.makeText(this,
+                "GitHub repo not configured (GITHUB_OWNER / GITHUB_REPO)", Toast.LENGTH_LONG).show()
+            return
+        }
+        ioScope.launch {
+            val info = runCatching { fetchLatestPrerelease() }.getOrElse { e ->
+                runOnUiThread {
+                    Toast.makeText(this@MainActivity,
+                        "Beta check failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+                return@launch
+            }
+            if (info == null) {
+                runOnUiThread {
+                    Toast.makeText(this@MainActivity,
+                        "No beta releases found", Toast.LENGTH_SHORT).show()
+                }
+                return@launch
+            }
+            val current = BuildConfig.VERSION_NAME
+            if (!isNewerVersion(info.tagName, current)) {
+                runOnUiThread {
+                    Toast.makeText(this@MainActivity,
+                        "Already on latest beta or newer (v$current)", Toast.LENGTH_SHORT).show()
+                }
+                return@launch
+            }
+            runOnUiThread { showBetaDialog(info, current) }
+        }
+    }
+
+    private fun showBetaDialog(info: ReleaseInfo, current: String) {
+        val msg = "Beta: ${info.tagName}  /  Current: v$current" +
+            if (info.releaseNotes.isNotBlank()) "\n\n${info.releaseNotes}" else ""
+        AlertDialog.Builder(this)
+            .setTitle("Beta update available")
+            .setMessage(msg)
+            .setPositiveButton("Download & Install") { _, _ -> downloadAndInstall(info) }
+            .setNegativeButton("Later", null)
+            .show()
+    }
+
+    private fun showUpdateDialog(info: ReleaseInfo, current: String) {
+        val msg = "New: ${info.tagName}  /  Current: v$current" +
+            if (info.releaseNotes.isNotBlank()) "\n\n${info.releaseNotes}" else ""
+        AlertDialog.Builder(this)
+            .setTitle("Update available")
+            .setMessage(msg)
+            .setPositiveButton("Download & Install") { _, _ -> downloadAndInstall(info) }
+            .setNegativeButton("Later", null)
+            .show()
+    }
+
+    private fun downloadAndInstall(info: ReleaseInfo) {
+        // Check install-unknown-apps permission (API 26+)
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            if (!packageManager.canRequestPackageInstalls()) {
+                AlertDialog.Builder(this)
+                    .setTitle("Permission required")
+                    .setMessage("Allow installing apps from unknown sources to apply updates.")
+                    .setPositiveButton("Open settings") { _, _ ->
+                        val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                            Uri.parse("package:$packageName"))
+                        startActivity(intent)
+                    }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+                return
+            }
+        }
+
+        // Build progress dialog
+        val progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            isIndeterminate = true
+            setPadding(60, 20, 60, 0)
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Downloading ${info.tagName}…")
+            .setView(progress)
+            .setCancelable(false)
+            .setNegativeButton("Cancel", null)
+            .create()
+        dialog.show()
+
+        val job = ioScope.launch {
+            try {
+                val dir = (getExternalFilesDir(null)?.let { File(it, "updates") }
+                    ?: File(filesDir, "updates")).also { it.mkdirs() }
+                val dest = File(dir, "update_${info.tagName}.apk")
+
+                downloadApk(info.apkUrl, dest, isCancelled = { !isActive }) { pct ->
+                    runOnUiThread {
+                        if (pct >= 0) {
+                            progress.isIndeterminate = false
+                            progress.max = 100
+                            progress.progress = pct
+                            dialog.setTitle("Downloading ${info.tagName}… $pct%")
+                        }
+                    }
+                }
+
+                if (!isActive) return@launch
+                runOnUiThread {
+                    dialog.dismiss()
+                    triggerInstall(dest)
+                }
+            } catch (e: CancellationException) {
+                runOnUiThread { dialog.dismiss() }
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Update download failed: ${e.message}", e)
+                runOnUiThread {
+                    dialog.dismiss()
+                    Toast.makeText(this@MainActivity,
+                        "Download failed: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+        // Cancel button must actually cancel the download. Previously it just
+        // dismissed the dialog while the launch coroutine kept running and
+        // then triggered the installer after the user said "Cancel".
+        dialog.setButton(AlertDialog.BUTTON_NEGATIVE, "Cancel") { _, _ ->
+            job.cancel()
+            dialog.dismiss()
+            Toast.makeText(this, "Update cancelled", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /**
+     * Downloads [apkUrl] to [dest], following HTTP redirects manually.
+     * [onProgress] called with 0-100 when Content-Length is known, -1 otherwise.
+     */
+    private fun downloadApk(
+        apkUrl: String,
+        dest: File,
+        isCancelled: () -> Boolean = { false },
+        onProgress: (Int) -> Unit
+    ) {
+        var targetUrl = apkUrl
+        repeat(8) { // max redirects
+            val conn = URL(targetUrl).openConnection() as HttpURLConnection
+            try {
+                conn.instanceFollowRedirects = false
+                conn.connectTimeout = 15_000
+                conn.readTimeout    = 60_000
+                conn.connect()
+                val code = conn.responseCode
+                if (code in 301..308) {
+                    targetUrl = conn.getHeaderField("Location")
+                        ?: error("Redirect with no Location header")
+                    return@repeat
+                }
+                val total = conn.contentLengthLong
+                conn.inputStream.use { input ->
+                    dest.outputStream().use { output ->
+                        var downloaded = 0L
+                        val buf = ByteArray(16_384)
+                        var n: Int
+                        while (input.read(buf).also { n = it } != -1) {
+                            // Honour cancellation — long downloads must
+                            // terminate when the user hits Cancel.
+                            if (isCancelled()) {
+                                dest.delete()
+                                throw CancellationException("Download cancelled")
+                            }
+                            output.write(buf, 0, n)
+                            downloaded += n
+                            onProgress(if (total > 0) ((downloaded * 100) / total).toInt() else -1)
+                        }
+                    }
+                }
+                return // success
+            } finally {
+                runCatching { conn.disconnect() }
+            }
+        }
+        error("Too many redirects for $apkUrl")
+    }
+
+    private fun triggerInstall(apkFile: File) {
+        val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", apkFile)
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "application/vnd.android.package-archive")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        startActivity(intent)
+    }
+
+    // ─── End In-app update ───────────────────────────────────────────────────
+
+    // ─── Photo Transfer ───────────────────────────────────────────────────────
+
+    private suspend fun prepareAndSendPhoto(uri: android.net.Uri) {
+        val chatId = remoteId.takeIf { it.isNotBlank() } ?: run {
+            runOnUiThread { Toast.makeText(this, "No active chat", Toast.LENGTH_SHORT).show() }
+            return
+        }
+        runOnUiThread { Toast.makeText(this, "Preparing photo…", Toast.LENGTH_SHORT).show() }
+
+        val original = contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) }
+        if (original == null) {
+            runOnUiThread { Toast.makeText(this, "Cannot read or decode photo", Toast.LENGTH_SHORT).show() }
+            return
+        }
+        val maxSide = 1200
+        val scaled = if (original.width > maxSide || original.height > maxSide) {
+            val ratio = minOf(maxSide.toFloat() / original.width, maxSide.toFloat() / original.height)
+            Bitmap.createScaledBitmap(original, (original.width * ratio).toInt(), (original.height * ratio).toInt(), true)
+        } else original
+        val baos = java.io.ByteArrayOutputStream()
+        scaled.compress(android.graphics.Bitmap.CompressFormat.JPEG, 75, baos)
+        val photoBytes = baos.toByteArray()
+        // Recycle bitmaps now that raw bytes are captured
+        if (scaled !== original) scaled.recycle()
+        original.recycle()
+
+        val recipientKeyB64 = runCatching {
+            db?.collection("users")?.document(chatId)?.get()?.await()
+                ?.getString("messagePublicKey")
+        }.getOrNull()
+
+        if (recipientKeyB64.isNullOrBlank()) {
+            runOnUiThread { Toast.makeText(this, "Cannot get contact's encryption key", Toast.LENGTH_SHORT).show() }
+            return
+        }
+
+        val aesKey = javax.crypto.KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
+        val iv = ByteArray(12).also { java.security.SecureRandom().nextBytes(it) }
+        val cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(javax.crypto.Cipher.ENCRYPT_MODE, aesKey, javax.crypto.spec.GCMParameterSpec(128, iv))
+        val encrypted = cipher.doFinal(photoBytes)
+
+        val wrappedKey = runCatching {
+            val kf = java.security.KeyFactory.getInstance("EC")
+            val recipientPub = kf.generatePublic(java.security.spec.X509EncodedKeySpec(b64decode(recipientKeyB64)))
+            val ephemKpg = java.security.KeyPairGenerator.getInstance("EC")
+            ephemKpg.initialize(java.security.spec.ECGenParameterSpec("secp256r1"))
+            val ephemKp = ephemKpg.generateKeyPair()
+            val ka = javax.crypto.KeyAgreement.getInstance("ECDH")
+            ka.init(ephemKp.private)
+            ka.doPhase(recipientPub, true)
+            val wrapAes = javax.crypto.spec.SecretKeySpec(sha256(ka.generateSecret()), "AES")
+            val wrapIv = ByteArray(12).also { java.security.SecureRandom().nextBytes(it) }
+            val wrapCipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
+            wrapCipher.init(javax.crypto.Cipher.ENCRYPT_MODE, wrapAes, javax.crypto.spec.GCMParameterSpec(128, wrapIv))
+            val wrappedKeyBytes = wrapCipher.doFinal(aesKey.encoded)
+            "${b64(ephemKp.public.encoded)}:${b64(wrapIv)}:${b64(wrappedKeyBytes)}"
+        }.getOrElse { e ->
+            runOnUiThread { Toast.makeText(this, "Encryption failed: ${e.message}", Toast.LENGTH_SHORT).show() }
+            return
+        }
+
+        val encKeyB64 = wrappedKey
+        val ivB64 = b64(iv)
+
+        val chunkSize = 12_000
+        val chunks = (0 until encrypted.size step chunkSize).map { i ->
+            encrypted.copyOfRange(i, minOf(i + chunkSize, encrypted.size))
+        }
+
+        val transferId = "$localId-photo-${System.currentTimeMillis()}"
+        outgoingPhotoTransferId = transferId
+        outgoingPhotoChatId = chatId
+
+        // Save photo locally for sender's chat view
+        val senderPhotoDir = File(filesDir, "photos/$chatId").also { it.mkdirs() }
+        val senderPhotoFile = File(senderPhotoDir, "$transferId.jpg")
+        senderPhotoFile.writeBytes(photoBytes)
+        runOnUiThread {
+            appendMessage(chatId, "Me", "[PHOTO:${senderPhotoFile.absolutePath}]")
+        }
+
+        runOnUiThread { Toast.makeText(this, "Connecting to send photo…", Toast.LENGTH_SHORT).show() }
+
+        val firestore = db ?: run {
+            runOnUiThread { Toast.makeText(this, "Not connected to server", Toast.LENGTH_SHORT).show() }
+            return
+        }
+
+        runOnUiThread { setupPhotoTransferPc(chatId) }
+        android.os.Handler(mainLooper).postDelayed({
+            photoTransferPc?.createOffer(object : SdpObserverAdapter() {
+                override fun onCreateSuccess(desc: SessionDescription?) {
+                    if (desc == null) return
+                    photoTransferPc?.setLocalDescription(object : SdpObserverAdapter() {
+                        override fun onSetSuccess() {
+                            firestore.collection("transfers").document(transferId).set(
+                                mapOf(
+                                    "transferId" to transferId,
+                                    "senderId" to localId,
+                                    "receiverId" to chatId,
+                                    "offer" to desc.description,
+                                    "state" to "pending",
+                                    "createdAt" to System.currentTimeMillis()
+                                )
+                            )
+                            listenPhotoTransferAnswer(transferId, chatId, chunks, encKeyB64, ivB64)
+                        }
+                        override fun onSetFailure(error: String?) {
+                            runOnUiThread { Toast.makeText(this@MainActivity, "Photo transfer setup failed: $error", Toast.LENGTH_SHORT).show() }
+                            cleanupPhotoTransfer()
+                        }
+                    }, desc)
+                }
+                override fun onCreateFailure(error: String?) {
+                    runOnUiThread { Toast.makeText(this@MainActivity, "Photo offer failed: $error", Toast.LENGTH_SHORT).show() }
+                }
+            }, MediaConstraints())
+        }, 200)
+    }
+
+    private fun setupPhotoTransferPc(chatId: String) {
+        val servers = listOf(
+            PeerConnection.IceServer.builder("stun:stun.relay.metered.ca:80").createIceServer(),
+            meteredTurnServer("turn:global.relay.metered.ca:80"),
+            meteredTurnServer("turn:global.relay.metered.ca:443"),
+            PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer()
+        )
+        val config = PeerConnection.RTCConfiguration(servers).apply {
+            continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
+        }
+        photoTransferPc = peerFactory.createPeerConnection(config, object : PeerConnection.Observer {
+            override fun onDataChannel(dc: DataChannel) {
+                photoTransferDc = dc
+                setupPhotoReceiveChannel(dc)
+            }
+            override fun onIceCandidate(cand: IceCandidate) {
+                val tid = outgoingPhotoTransferId ?: return
+                db?.collection("transfers")?.document(tid)
+                    ?.collection("candidates")
+                    ?.add(mapOf(
+                        "sender" to localId,
+                        "sdpMid" to cand.sdpMid,
+                        "sdpMLineIndex" to cand.sdpMLineIndex,
+                        "candidate" to cand.sdp
+                    ))
+            }
+            override fun onConnectionChange(state: PeerConnection.PeerConnectionState?) {
+                if (state == PeerConnection.PeerConnectionState.FAILED ||
+                    state == PeerConnection.PeerConnectionState.DISCONNECTED) {
+                    runOnUiThread {
+                        Toast.makeText(this@MainActivity, "Photo transfer connection lost", Toast.LENGTH_SHORT).show()
+                        cleanupPhotoTransfer()
+                    }
+                }
+            }
+            override fun onIceCandidatesRemoved(p0: Array<out IceCandidate>?) {}
+            override fun onSignalingChange(p0: PeerConnection.SignalingState?) {}
+            override fun onIceConnectionChange(p0: PeerConnection.IceConnectionState?) {}
+            override fun onIceGatheringChange(p0: PeerConnection.IceGatheringState?) {}
+            override fun onIceConnectionReceivingChange(p0: Boolean) {}
+            override fun onAddStream(p0: MediaStream?) {}
+            override fun onRemoveStream(p0: MediaStream?) {}
+            override fun onAddTrack(p0: RtpReceiver?, p1: Array<out MediaStream>?) {}
+            override fun onRenegotiationNeeded() {}
+        }) ?: run {
+            Log.e(TAG, "setupPhotoTransferPc: createPeerConnection returned null")
+            runOnUiThread { Toast.makeText(this, "Photo connection setup failed", Toast.LENGTH_SHORT).show() }
+            return
+        }
+
+        val dcInit = DataChannel.Init().apply { ordered = true }
+        val safePc = photoTransferPc ?: return  // already null-guarded above, but avoid !!
+        photoTransferDc = safePc.createDataChannel("photo", dcInit)
+    }
+
+    private fun listenPhotoTransferAnswer(
+        transferId: String,
+        chatId: String,
+        chunks: List<ByteArray>,
+        encKeyB64: String,
+        ivB64: String
+    ) {
+        val firestore = db ?: return
+        val listener = firestore.collection("transfers").document(transferId)
+            .addSnapshotListener { snap, _ ->
+                val state = snap?.getString("state") ?: return@addSnapshotListener
+                if (state != "accepted") return@addSnapshotListener
+                val answer = snap.getString("answer") ?: return@addSnapshotListener
+                if (photoTransferPc == null) return@addSnapshotListener
+
+                photoTransferPc?.setRemoteDescription(object : SdpObserverAdapter() {
+                    override fun onSetSuccess() {
+                        listenPhotoTransferCandidates(transferId)
+                        waitForPhotoChannelAndSend(transferId, chatId, chunks, encKeyB64, ivB64)
+                    }
+                    override fun onSetFailure(error: String?) {
+                        runOnUiThread { Toast.makeText(this@MainActivity, "Photo answer rejected: $error", Toast.LENGTH_SHORT).show() }
+                    }
+                }, SessionDescription(SessionDescription.Type.ANSWER, answer))
+            }
+        // Use separate list — not shared with call listeners (removeListeners() would kill this)
+        photoTransferListeners.add(listener)
+    }
+
+    private fun listenPhotoTransferCandidates(transferId: String) {
+        val firestore = db ?: return
+        // Both sides exclude their OWN candidates and add only the REMOTE peer's.
+        val excludeSender = localId
+        val listener = firestore.collection("transfers").document(transferId)
+            .collection("candidates")
+            .addSnapshotListener { snap, _ ->
+                snap?.documentChanges?.forEach { change ->
+                    if (change.type == com.google.firebase.firestore.DocumentChange.Type.ADDED) {
+                        val doc = change.document
+                        if (doc.getString("sender") == excludeSender) return@forEach
+                        val cand = IceCandidate(
+                            doc.getString("sdpMid") ?: return@forEach,
+                            doc.getLong("sdpMLineIndex")?.toInt() ?: return@forEach,
+                            doc.getString("candidate") ?: return@forEach
+                        )
+                        photoTransferPc?.addIceCandidate(cand)
+                    }
+                }
+            }
+        photoTransferListeners.add(listener)
+    }
+
+    private fun waitForPhotoChannelAndSend(
+        transferId: String,
+        chatId: String,
+        chunks: List<ByteArray>,
+        encKeyB64: String,
+        ivB64: String
+    ) {
+        val dc = photoTransferDc ?: return
+        val startTime = System.currentTimeMillis()
+
+        fun tryOpen() {
+            if (dc.state() == DataChannel.State.OPEN) {
+                if (!photoSendInProgress) {
+                    photoSendInProgress = true
+                    sendPhotoOverChannel(dc, transferId, chatId, chunks, encKeyB64, ivB64)
+                }
+                return
+            }
+            if (System.currentTimeMillis() - startTime > 30_000) {
+                runOnUiThread { Toast.makeText(this, "Photo transfer timed out — contact may be offline", Toast.LENGTH_LONG).show() }
+                cleanupPhotoTransfer()
+                return
+            }
+            android.os.Handler(mainLooper).postDelayed({ tryOpen() }, 500)
+        }
+
+        dc.registerObserver(object : DataChannel.Observer {
+            override fun onStateChange() {
+                if (dc.state() == DataChannel.State.OPEN) {
+                    runOnUiThread {
+                        if (!photoSendInProgress) {
+                            photoSendInProgress = true
+                            sendPhotoOverChannel(dc, transferId, chatId, chunks, encKeyB64, ivB64)
+                        }
+                    }
+                }
+            }
+            override fun onMessage(buffer: DataChannel.Buffer) {}
+            override fun onBufferedAmountChange(p0: Long) {}
+        })
+        android.os.Handler(mainLooper).postDelayed({ tryOpen() }, 1000)
+    }
+
+    private fun sendPhotoOverChannel(
+        dc: DataChannel,
+        transferId: String,
+        chatId: String,
+        chunks: List<ByteArray>,
+        encKeyB64: String,
+        ivB64: String
+    ) {
+        ioScope.launch {
+            try {
+                val startPacket = "PHO_START|$transferId|${chunks.size}|$encKeyB64|$ivB64|$chatId"
+                sendPhotoPacket(dc, startPacket)
+                chunks.forEachIndexed { index, chunk ->
+                    val chunkPacket = "PHO_CHUNK|$transferId|$index|${b64(chunk)}"
+                    sendPhotoPacket(dc, chunkPacket)
+                    delay(10)
+                }
+                sendPhotoPacket(dc, "PHO_END|$transferId")
+
+                runOnUiThread {
+                    Toast.makeText(this@MainActivity, "Photo sent!", Toast.LENGTH_SHORT).show()
+                }
+
+                db?.collection("transfers")?.document(transferId)?.update("state", "done")
+                cleanupPhotoTransfer()
+
+            } catch (e: Exception) {
+                runOnUiThread { Toast.makeText(this@MainActivity, "Photo send error: ${e.message}", Toast.LENGTH_SHORT).show() }
+                cleanupPhotoTransfer()
+            }
+        }
+    }
+
+    private fun sendPhotoPacket(dc: DataChannel, packet: String) {
+        val bytes = packet.toByteArray(Charsets.UTF_8)
+        dc.send(DataChannel.Buffer(java.nio.ByteBuffer.wrap(bytes), false))
+    }
+
+    private fun listenIncomingPhotoTransfers() {
+        val firestore = db ?: return
+        incomingTransferListener?.remove()
+        incomingTransferListener = firestore.collection("transfers")
+            .whereEqualTo("receiverId", localId)
+            .whereEqualTo("state", "pending")
+            .addSnapshotListener { snap, error ->
+                if (error != null) return@addSnapshotListener
+                snap?.documentChanges?.forEach { change ->
+                    if (change.type == com.google.firebase.firestore.DocumentChange.Type.ADDED) {
+                        val doc = change.document
+                        val offer = doc.getString("offer") ?: return@forEach
+                        val transferId = doc.getString("transferId") ?: doc.id
+                        val senderId = doc.getString("senderId") ?: return@forEach
+                        acceptIncomingPhotoTransfer(doc.id, transferId, senderId, offer)
+                    }
+                }
+            }
+    }
+
+    private fun acceptIncomingPhotoTransfer(docId: String, transferId: String, senderId: String, offer: String) {
+        val firestore = db ?: return
+        val chatId = senderId
+
+        if (photoTransferPc != null) {
+            return
+        }
+
+        outgoingPhotoTransferId = transferId
+        outgoingPhotoChatId = chatId
+
+        runOnUiThread {
+            setupPhotoTransferPcReceiver(transferId)
+            photoTransferPc?.setRemoteDescription(object : SdpObserverAdapter() {
+                override fun onSetSuccess() {
+                    photoTransferPc?.createAnswer(object : SdpObserverAdapter() {
+                        override fun onCreateSuccess(desc: SessionDescription?) {
+                            if (desc == null) return
+                            photoTransferPc?.setLocalDescription(object : SdpObserverAdapter() {
+                                override fun onSetSuccess() {
+                                    firestore.collection("transfers").document(docId).update(
+                                        mapOf("answer" to desc.description, "state" to "accepted")
+                                    )
+                                    listenPhotoTransferCandidates(docId)
+                                }
+                                override fun onSetFailure(error: String?) {}
+                            }, desc)
+                        }
+                        override fun onCreateFailure(error: String?) {}
+                    }, MediaConstraints())
+                }
+                override fun onSetFailure(error: String?) {
+                    cleanupPhotoTransfer()
+                }
+            }, SessionDescription(SessionDescription.Type.OFFER, offer))
+        }
+    }
+
+    private fun setupPhotoTransferPcReceiver(transferId: String) {
+        val servers = listOf(
+            PeerConnection.IceServer.builder("stun:stun.relay.metered.ca:80").createIceServer(),
+            meteredTurnServer("turn:global.relay.metered.ca:80"),
+            meteredTurnServer("turn:global.relay.metered.ca:443"),
+            PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer()
+        )
+        val config = PeerConnection.RTCConfiguration(servers).apply {
+            continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
+        }
+        photoTransferPc = peerFactory.createPeerConnection(config, object : PeerConnection.Observer {
+            override fun onDataChannel(dc: DataChannel) {
+                photoTransferDc = dc
+                setupPhotoReceiveChannel(dc)
+            }
+            override fun onIceCandidate(cand: IceCandidate) {
+                db?.collection("transfers")?.document(transferId)
+                    ?.collection("candidates")
+                    ?.add(mapOf(
+                        "sender" to localId,
+                        "sdpMid" to cand.sdpMid,
+                        "sdpMLineIndex" to cand.sdpMLineIndex,
+                        "candidate" to cand.sdp
+                    ))
+            }
+            override fun onConnectionChange(state: PeerConnection.PeerConnectionState?) {
+                if (state == PeerConnection.PeerConnectionState.FAILED ||
+                    state == PeerConnection.PeerConnectionState.DISCONNECTED) {
+                    runOnUiThread {
+                        Toast.makeText(this@MainActivity, "Photo transfer connection lost", Toast.LENGTH_SHORT).show()
+                        cleanupPhotoTransfer()
+                    }
+                }
+            }
+            override fun onIceCandidatesRemoved(p0: Array<out IceCandidate>?) {}
+            override fun onSignalingChange(p0: PeerConnection.SignalingState?) {}
+            override fun onIceConnectionChange(p0: PeerConnection.IceConnectionState?) {}
+            override fun onIceGatheringChange(p0: PeerConnection.IceGatheringState?) {}
+            override fun onIceConnectionReceivingChange(p0: Boolean) {}
+            override fun onAddStream(p0: MediaStream?) {}
+            override fun onRemoveStream(p0: MediaStream?) {}
+            override fun onAddTrack(p0: RtpReceiver?, p1: Array<out MediaStream>?) {}
+            override fun onRenegotiationNeeded() {}
+        }) ?: run {
+            Log.e(TAG, "setupPhotoTransferPcReceiver: createPeerConnection returned null")
+            runOnUiThread { Toast.makeText(this, "Photo connection setup failed", Toast.LENGTH_SHORT).show() }
+            return
+        }
+    }
+
+    private fun setupPhotoReceiveChannel(dc: DataChannel) {
+        dc.registerObserver(object : DataChannel.Observer {
+            override fun onMessage(buffer: DataChannel.Buffer) {
+                // Copy data here (ByteBuffer becomes invalid after callback returns)
+                val bytes = ByteArray(buffer.data.remaining()).also { buffer.data.get(it) }
+                val packet = bytes.toString(Charsets.UTF_8)
+                // Dispatch to main: keeps all assembly state and cleanupPhotoTransfer on main thread
+                // (dispose() from WebRTC callback thread = deadlock risk)
+                runOnUiThread { handlePhotoPacket(packet) }
+            }
+            override fun onStateChange() {}
+            override fun onBufferedAmountChange(p0: Long) {}
+        })
+    }
+
+    private fun handlePhotoPacket(packet: String) {
+        when {
+            packet.startsWith("PHO_START|") -> {
+                val parts = packet.split("|")
+                if (parts.size < 6) return
+                val transferId = parts[1]
+                val totalChunks = parts[2].toIntOrNull() ?: return
+                val encKeyB64 = parts[3]
+                val ivB64 = parts[4]
+                val chatId = parts[5]
+
+                // Guard against attacker-controlled OOM: cap chunks at a sane upper bound.
+                // 4096 chunks × ~12KB ≈ 48 MB max photo. Photos larger than this are rejected.
+                if (totalChunks <= 0 || totalChunks > 4096) {
+                    Log.w(TAG, "PHO_START rejected — invalid totalChunks=$totalChunks")
+                    return
+                }
+                // Guard against PHO_START clobbering an in-flight assembly. Receiver-side
+                // photoTransferPc gate (setupPhotoTransferPcReceiver) usually prevents this,
+                // but defend in depth.
+                if (assemblingTransferId != null && assemblingTransferId != transferId) {
+                    Log.w(TAG, "PHO_START while assembling ${assemblingTransferId} — ignoring new transfer $transferId")
+                    return
+                }
+
+                assemblingTransferId = transferId
+                assemblingChatId = chatId
+                assemblingExpected = totalChunks
+                assemblingChunks = arrayOfNulls(totalChunks)
+                assemblingReceived = 0
+                val keyParts = encKeyB64.split(":")
+                if (keyParts.size != 3) return
+                val aesKeyBytes = runCatching {
+                    val kp = myEcKeyPair ?: return
+                    val kf = java.security.KeyFactory.getInstance("EC")
+                    val ephemPub = kf.generatePublic(java.security.spec.X509EncodedKeySpec(b64decode(keyParts[0])))
+                    val ka = javax.crypto.KeyAgreement.getInstance("ECDH")
+                    ka.init(kp.private)
+                    ka.doPhase(ephemPub, true)
+                    val wrapAes = javax.crypto.spec.SecretKeySpec(sha256(ka.generateSecret()), "AES")
+                    val wrapIv = b64decode(keyParts[1])
+                    val wrapCipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
+                    wrapCipher.init(javax.crypto.Cipher.DECRYPT_MODE, wrapAes, javax.crypto.spec.GCMParameterSpec(128, wrapIv))
+                    wrapCipher.doFinal(b64decode(keyParts[2]))
+                }.getOrNull() ?: return
+
+                assemblingKey = aesKeyBytes
+                assemblingIv = b64decode(ivB64)
+            }
+
+            packet.startsWith("PHO_CHUNK|") -> {
+                val parts = packet.split("|")
+                if (parts.size < 4) return
+                val transferId = parts[1]
+                if (transferId != assemblingTransferId) return
+                val index = parts[2].toIntOrNull() ?: return
+                val data = runCatching { b64decode(parts[3]) }.getOrNull() ?: return
+                val arr = assemblingChunks ?: return
+                // Bounds check + dedup: duplicate index would double-count assemblingReceived
+                // and falsely satisfy assemblingReceived == assemblingExpected with a hole.
+                if (index in 0 until arr.size && arr[index] == null) {
+                    arr[index] = data
+                    assemblingReceived++
+                }
+            }
+
+            packet.startsWith("PHO_END|") -> {
+                val parts = packet.split("|")
+                if (parts.size < 2) return
+                val transferId = parts[1]
+                if (transferId != assemblingTransferId) return
+
+                val chunks = assemblingChunks ?: return
+                val key = assemblingKey ?: return
+                val iv = assemblingIv ?: return
+                // Use outgoingPhotoChatId (= senderId, set by acceptIncomingPhotoTransfer).
+                // assemblingChatId contains the sender's remoteId which equals our own localId —
+                // wrong key for the local chat log and photo directory.
+                val chatId = outgoingPhotoChatId ?: assemblingChatId ?: return
+
+                // C5: verify all chunks arrived before attempting decryption
+                if (assemblingReceived != assemblingExpected) {
+                    runOnUiThread {
+                        Toast.makeText(this,
+                            "Photo transfer incomplete ($assemblingReceived/${assemblingExpected} chunks)",
+                            Toast.LENGTH_SHORT).show()
+                    }
+                    cleanupPhotoTransfer()
+                    resetAssembly()
+                    return
+                }
+
+                // Concatenate chunks via ByteArrayOutputStream. The previous
+                // `fold(ByteArray(0)) { acc, b -> acc + b }` was O(N²) — for a
+                // 1 MB photo it allocated ~50 MB of intermediate arrays and OOM'd
+                // on low-memory devices.
+                val totalSize = chunks.sumOf { it?.size ?: 0 }
+                val baos = java.io.ByteArrayOutputStream(totalSize)
+                chunks.forEach { it?.let(baos::write) }
+                val encryptedBytes = baos.toByteArray()
+
+                val photoBytes = runCatching {
+                    val aesKey = javax.crypto.spec.SecretKeySpec(key, "AES")
+                    val cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
+                    cipher.init(javax.crypto.Cipher.DECRYPT_MODE, aesKey, javax.crypto.spec.GCMParameterSpec(128, iv))
+                    cipher.doFinal(encryptedBytes)
+                }.getOrElse { e ->
+                    runOnUiThread { Toast.makeText(this, "Photo decrypt failed: ${e.message}", Toast.LENGTH_SHORT).show() }
+                    cleanupPhotoTransfer()
+                    resetAssembly()
+                    return
+                }
+
+                ioScope.launch {
+                    val photoDir = File(filesDir, "photos/$chatId").also { it.mkdirs() }
+                    val dest = File(photoDir, "$transferId.jpg")
+                    dest.writeBytes(photoBytes)
+                    val path = dest.absolutePath
+                    runOnUiThread {
+                        appendMessage(chatId, contactName(chatId), "[PHOTO:$path]")
+                        notifyIncomingMessage(chatId, "📷 Photo")
+                        Toast.makeText(this@MainActivity, "Photo received", Toast.LENGTH_SHORT).show()
+                    }
+                }
+
+                cleanupPhotoTransfer()
+                resetAssembly()
+            }
+        }
+    }
+
+    private fun resetAssembly() {
+        assemblingTransferId = null
+        assemblingChatId = null
+        assemblingChunks = null
+        assemblingExpected = 0
+        assemblingKey = null
+        assemblingIv = null
+        assemblingReceived = 0
+    }
+
+    private fun cleanupPhotoTransfer() {
+        // Called from main (PHO_END), IO scope (sendPhotoOverChannel catch), and
+        // WebRTC signaling threads (onConnectionChange FAILED). Without sync,
+        // concurrent `photoTransferPc?.dispose()` → native double-free crash.
+        synchronized(photoTransferLock) {
+            photoTransferListeners.forEach { runCatching { it.remove() } }
+            photoTransferListeners.clear()
+            runCatching { photoTransferDc?.close() }
+            photoTransferDc = null
+            runCatching { photoTransferPc?.dispose() }
+            photoTransferPc = null
+            outgoingPhotoTransferId = null
+            outgoingPhotoChatId = null
+            photoSendInProgress = false
+        }
+    }
+
+    private fun showFullScreenPhoto(path: String) {
+        val file = File(path)
+        if (!file.exists()) {
+            Toast.makeText(this, "Photo file not found", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val bmp = BitmapFactory.decodeFile(path) ?: return
+        val iv = ImageView(this).apply {
+            setImageBitmap(bmp)
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            layoutParams = android.view.ViewGroup.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        }
+        AlertDialog.Builder(this)
+            .setView(iv)
+            .setPositiveButton("Close", null)
+            .show()
+    }
+
+    // ─── End Photo Transfer ───────────────────────────────────────────────────
+
     private fun startCallSetupTimeout(callId: String, sessionId: String) {
         cancelCallTimeout()
         callTimeoutJob = ioScope.launch {
@@ -2186,9 +4061,9 @@ class MainActivity : AppCompatActivity() {
         val minutes = (totalSeconds % 3600L) / 60L
         val seconds = totalSeconds % 60L
         return if (hours > 0L) {
-            "%d:%02d:%02d".format(Locale.US, hours, minutes, seconds)
+            String.format(Locale.US, "%d:%02d:%02d", hours, minutes, seconds)
         } else {
-            "%02d:%02d".format(Locale.US, minutes, seconds)
+            String.format(Locale.US, "%02d:%02d", minutes, seconds)
         }
     }
 
@@ -2323,6 +4198,9 @@ class MainActivity : AppCompatActivity() {
                         }
                     } else if (read < 0) {
                         Log.w(LOG_TAG, "record read error=$read")
+                        delay(frameMs)
+                    } else {
+                        // read == 0: transient mic stall — yield instead of busy-looping CPU.
                         delay(frameMs)
                     }
                 }
@@ -2494,7 +4372,11 @@ class MainActivity : AppCompatActivity() {
             val seq = rxVoiceSeq ?: return null
             val firstBufferedSeq = if (voiceJitterBuffer.isEmpty()) null else voiceJitterBuffer.firstKey()
             if (firstBufferedSeq != null && seq < firstBufferedSeq) {
-                rxVoiceSeq = firstBufferedSeq
+                // Resync: advance rxVoiceSeq PAST the frame we're about to return.
+                // Previous code set `rxVoiceSeq = firstBufferedSeq` and then removed
+                // that key — the next call would re-enter the gap branch and skip
+                // the legitimate next frame, causing audible clicks every jitter.
+                rxVoiceSeq = firstBufferedSeq + 1
                 Log.d(LOG_TAG, "voice resync old=$seq new=$firstBufferedSeq buffered=${voiceJitterBuffer.size}")
                 return voiceJitterBuffer.remove(firstBufferedSeq)
             }
@@ -2532,7 +4414,7 @@ class MainActivity : AppCompatActivity() {
                     val candidate = map["candidate"] as String? ?: return@forEach
                     Log.d(LOG_TAG, "remote candidate ${candidateType(candidate)} mid=$sdpMid")
                     val cand = IceCandidate(sdpMid, sdpMLineIndex, candidate)
-                    peerConnection.addIceCandidate(cand)
+                    if (::peerConnection.isInitialized) peerConnection.addIceCandidate(cand)
                 }
         }
         addListener(listener)
@@ -2551,6 +4433,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun resetPeerConnection(createLocalChannels: Boolean) {
         cancelCallTimeout()
+        // Stop the call foreground service / notification on every teardown path
+        // (remote ended, finishCallAndReturn, etc.) — no-op when not running.
+        CallForegroundService.stop(this)
         stopAudio()
         removeListeners()
         voiceChannel?.close()
@@ -2561,10 +4446,12 @@ class MainActivity : AppCompatActivity() {
         localWebRtcAudioSource?.dispose()
         localWebRtcAudioTrack = null
         localWebRtcAudioSource = null
-        if (::peerConnection.isInitialized) {
-            peerConnection.close()
-            peerConnection.dispose()
-        }
+        runCatching {
+            if (::peerConnection.isInitialized) {
+                peerConnection.close()
+                peerConnection.dispose()
+            }
+        }.onFailure { Log.w(TAG, "resetPeerConnection dispose error: ${it.message}") }
         clearCallState()
         initPeerConnection(createLocalChannels)
         if (!createLocalChannels) {
@@ -2578,6 +4465,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun disconnectCall() {
+        // Stop the call foreground service / notification regardless of path.
+        CallForegroundService.stop(this)
+
         val firestore = db
         val callId = currentCallId
         val sessionId = currentSessionId
@@ -2652,9 +4542,7 @@ class MainActivity : AppCompatActivity() {
         synchronized(pendingMessages) {
             pendingMessages.clear()
         }
-        synchronized(processedCandidateIds) {
-            processedCandidateIds.clear()
-        }
+        processedCandidateIds.clear()
         txVoiceSeq = 0
         rxVoiceSeq = null
         answerProcessed = false
@@ -2697,20 +4585,30 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        // Cancel coroutines first — stops any in-flight IO that touches native objects.
+        ioScope.cancel()
+        messagePollJob = null
+        cancelCallTimeout()
         stopAudio()
         removeListeners()
         incomingListener?.remove()
         incomingListener = null
-        messagePollJob?.cancel()
-        messagePollJob = null
-        cancelCallTimeout()
-        ioScope.cancel()
+        incomingTransferListener?.remove()
+        incomingTransferListener = null
+        photoTransferListeners.forEach { it.remove() }
+        photoTransferListeners.clear()
+        cleanupPhotoTransfer()
         releaseSharedCodec()
-        if (::peerConnection.isInitialized) {
-            peerConnection.close()
-            peerConnection.dispose()
-        }
-        if (::peerFactory.isInitialized) peerFactory.dispose()
+        // Wrap WebRTC dispose in try-catch: callbacks on other threads may still fire briefly.
+        runCatching {
+            if (::peerConnection.isInitialized) {
+                peerConnection.close()
+                peerConnection.dispose()
+            }
+        }.onFailure { Log.w(TAG, "peerConnection dispose error: ${it.message}") }
+        runCatching {
+            if (::peerFactory.isInitialized) peerFactory.dispose()
+        }.onFailure { Log.w(TAG, "peerFactory dispose error: ${it.message}") }
     }
 
     companion object {
@@ -2730,35 +4628,40 @@ class MainActivity : AppCompatActivity() {
         private const val CODEC2_BASE_TARGET_RMS = 8500.0
         private const val CODEC2_BASE_MAX_GAIN = 4.0
         private const val CODEC2_LIMIT = 30000
-        private const val RSA_KEY_BITS = 2048
-        private const val AES_KEY_BITS = 256
         private const val AES_GCM_IV_BYTES = 12
         private const val AES_GCM_TAG_BITS = 128
-        private const val RSA_KEY_ALGORITHM = "RSA"
+        private const val EC_KEY_ALGORITHM = "ECDH/P-256"
         private const val AES_MESSAGE_ALGORITHM = "AES/GCM/NoPadding"
-        private const val RSA_OAEP_SHA256 = "RSA/ECB/OAEPWithSHA-256AndMGF1Padding"
-        private const val RSA_OAEP_SHA1 = "RSA/ECB/OAEPWithSHA-1AndMGF1Padding"
         private const val LOG_TAG = "XxxLinkCall"
+        private const val TAG = LOG_TAG
         private const val PREFS_NAME = "xxxlink_prefs"
         private const val KEY_LOCAL_ID = "local_id"
-        private const val KEY_PHOTO_ACCOUNT_DOC = "photo_account_doc"
         private const val KEY_PHOTO_ACCOUNT_SECRET = "photo_account_secret"
-        private const val KEY_MESSAGE_PUBLIC_KEY = "message_public_key"
-        private const val KEY_MESSAGE_PRIVATE_KEY = "message_private_key"
         private const val KEY_CONTACT_IDS = "contact_ids"
         private const val KEY_CONTACT_PREFIX = "contact_name_"
         private const val KEY_CHAT_LOG_PREFIX = "chat_log_"
         private const val KEY_CHAT_READ_PREFIX = "chat_read_count_"
+        private const val KEY_APP_IN_FOREGROUND = "app_in_foreground"
+        private const val KEY_APP_LOCK_ENABLED = "app_lock_enabled"
+        private const val KEY_APP_PIN_HASH = "app_pin_hash"
+        private const val KEY_APP_PIN_SALT = "app_pin_salt"
+        private const val KEY_PIN_FAILURES = "app_pin_failures"
+        private const val KEY_PIN_LOCKOUT_UNTIL = "app_pin_lockout_until"
         private const val BACKUP_MAGIC = "XLINKBAK"
         private const val BACKUP_VERSION = 2   // v2 = photo-key (no password/PBKDF2)
         private const val BACKUP_IV_BYTES = 12
+        private const val KEY_BACKUP_LAST_PATH = "backup_last_path"
         private const val KEY_SEEN_MESSAGE_IDS = "seen_message_ids"
         private const val KEY_FCM_TOKEN = "fcm_token"
         private const val KEY_UNREAD_NOTIFICATION_COUNT = "unread_notification_count"
-        private const val PHOTO_ACCOUNTS_COLLECTION = "photoAccounts"
-        private const val PHOTO_ACCOUNT_SALT = "x-link-photo-account-v1"
         private const val PHOTO_ACCOUNT_KEY_SALT = "x-link-photo-key-v1"
-        private const val MESSAGE_KEY_BUNDLE_VERSION = 1
+        // ── GitHub update ──────────────────────────────────────────────────────
+        // Set these after creating your GitHub repository.
+        // Releases must have an .apk file as a release asset.
+        private const val GITHUB_OWNER = "nykleforse"
+        private const val GITHUB_REPO  = "xxxlinxxx"
+        private const val GITHUB_API   =
+            "https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/releases/latest"
         private const val NOTIFICATION_CALLS_CHANNEL_ID = "xxxlink_calls_v3"
         private const val NOTIFICATION_MESSAGES_CHANNEL_ID = "xxxlink_messages_v3"
         private const val NOTIFICATION_CALL_ID = 5001
@@ -2814,15 +4717,7 @@ class MainActivity : AppCompatActivity() {
         val keyAlgorithm: String
     )
 
-    private data class PhotoAuthMaterial(
-        val documentId: String,
-        val secret: ByteArray
-    )
-
-    private data class RsaCipherBytes(
-        val bytes: ByteArray,
-        val algorithm: String
-    )
+    private data class PhotoAuthMaterial(val secret: ByteArray)
 
     private enum class PendingMicAction {
         OUTGOING_CALL,

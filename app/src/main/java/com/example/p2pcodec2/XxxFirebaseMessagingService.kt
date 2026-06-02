@@ -51,6 +51,10 @@ class XxxFirebaseMessagingService : FirebaseMessagingService() {
     }
 
     private fun showCallNotification(data: Map<String, String>) {
+        // Suppress FCM-driven call notif when app is in foreground — the Firestore
+        // listener already shows the in-app incoming-call screen with its own
+        // ringtone. Double-firing causes two overlapping sounds.
+        if (isAppInForeground()) return
         val callerId = data["callerId"].orEmpty()
         val callerName = contactName(callerId)
         val intent = contentIntent()
@@ -74,7 +78,13 @@ class XxxFirebaseMessagingService : FirebaseMessagingService() {
         notificationManager().notify(NOTIFICATION_CALL_ID, notification)
     }
 
+    private fun isAppInForeground(): Boolean {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getBoolean(KEY_APP_IN_FOREGROUND, false)
+    }
+
     private fun showMessageNotification(data: Map<String, String>) {
+        if (isAppInForeground()) return
         val senderId = data["senderId"].orEmpty()
         val senderName = contactName(senderId).ifBlank { "New message" }
         val body = data["body"]?.takeIf { it.isNotBlank() } ?: "Encrypted message"
@@ -193,5 +203,6 @@ class XxxFirebaseMessagingService : FirebaseMessagingService() {
         private const val NOTIFICATION_CALL_ID = 5001
         private const val NOTIFICATION_MESSAGE_ID_BASE = 6000
         private const val NOTIFICATION_FALLBACK_ID = 7001
+        private const val KEY_APP_IN_FOREGROUND = "app_in_foreground"
     }
 }
