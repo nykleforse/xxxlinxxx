@@ -2547,20 +2547,6 @@ class MainActivity : AppCompatActivity() {
                                   onLongClick: (() -> Unit)? = null): android.view.View {
         val dp = resources.displayMetrics.density
 
-        val ssb = android.text.SpannableStringBuilder(text)
-        if (status != null) {
-            val gray = 0xFF888888.toInt()
-            val blue = 0xFF2196F3.toInt()
-            val (mark, color) = when (status) {
-                MsgStatus.SENT      -> " ✓"  to gray
-                MsgStatus.DELIVERED -> " ✓✓" to gray
-                MsgStatus.READ      -> " ✓✓" to blue
-            }
-            val start = ssb.length
-            ssb.append(mark)
-            ssb.setSpan(android.text.style.ForegroundColorSpan(color), start, ssb.length, android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
-        }
-
         val bubbleLayout = android.widget.LinearLayout(this).apply {
             orientation = android.widget.LinearLayout.VERTICAL
             background = ContextCompat.getDrawable(
@@ -2572,17 +2558,48 @@ class MainActivity : AppCompatActivity() {
             setPadding(pad, padV, pad, padV)
 
             addView(android.widget.TextView(this@MainActivity).apply {
-                setText(ssb, android.widget.TextView.BufferType.SPANNABLE)
+                this.text = text
                 textSize = 15f
                 setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_primary))
             })
-            if (time != null) {
-                addView(android.widget.TextView(this@MainActivity).apply {
-                    this.text = time
-                    textSize = 10f
-                    setTextColor(0xFF666666.toInt())
-                    gravity = android.view.Gravity.END
-                    setPadding(0, (2 * dp).toInt(), 0, 0)
+
+            // Time + status on a compact bottom-right row (Telegram-style).
+            if (time != null || status != null) {
+                addView(android.widget.LinearLayout(this@MainActivity).apply {
+                    orientation = android.widget.LinearLayout.HORIZONTAL
+                    gravity = android.view.Gravity.END or android.view.Gravity.CENTER_VERTICAL
+                    layoutParams = android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                        android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply { topMargin = (2 * dp).toInt() }
+
+                    if (time != null) {
+                        addView(android.widget.TextView(this@MainActivity).apply {
+                            this.text = time
+                            textSize = 10f
+                            setTextColor(0xFF888888.toInt())
+                            includeFontPadding = false
+                        })
+                    }
+                    if (status != null) {
+                        val gray = 0xFF888888.toInt()
+                        val blue = 0xFF4FC3F7.toInt()
+                        val (mark, color) = when (status) {
+                            MsgStatus.SENT      -> "✓"  to gray
+                            MsgStatus.DELIVERED -> "✓✓" to gray
+                            MsgStatus.READ      -> "✓✓" to blue
+                        }
+                        addView(android.widget.TextView(this@MainActivity).apply {
+                            this.text = mark
+                            textSize = 11f
+                            setTextColor(color)
+                            includeFontPadding = false
+                            // Compact double-tick via negative letter-spacing (overlap effect).
+                            letterSpacing = -0.18f
+                            setPadding((4 * dp).toInt(), 0, 0, 0)
+                            setTypeface(typeface, android.graphics.Typeface.BOLD)
+                        })
+                    }
                 })
             }
             if (onLongClick != null) {
