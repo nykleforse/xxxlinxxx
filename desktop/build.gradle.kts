@@ -22,6 +22,15 @@ dependencies {
 
     // Crypto / utility — kept pure-JVM for now, will share with Android in M2.
     implementation("org.json:json:20240303")
+
+    // WebRTC for desktop. devopvoid bundles pre-built native libs for
+    // Windows x64 + Linux x64 + macOS arm64/x64 directly in the JAR, so
+    // there is no manual libwebrtc compile step for end users.
+    // M7 voice-call wiring lives in desktop/.../call/VoiceCallController.kt.
+    implementation("dev.onvoid.webrtc:webrtc-java:0.10.0")
+    implementation("dev.onvoid.webrtc:webrtc-java:0.10.0:windows-x86_64")
+    implementation("dev.onvoid.webrtc:webrtc-java:0.10.0:linux-x86_64")
+    implementation("dev.onvoid.webrtc:webrtc-java:0.10.0:macos-x86_64")
 }
 
 compose.desktop {

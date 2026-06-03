@@ -27,6 +27,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -38,6 +39,9 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.xxxlinkxxx.desktop.call.CallOverlay
+import com.example.xxxlinkxxx.desktop.call.CallUiState
+import com.example.xxxlinkxxx.desktop.call.VoiceCallController
 import com.example.xxxlinkxxx.desktop.crypto.Crypto
 import com.example.xxxlinkxxx.desktop.net.FirebaseClient
 import com.example.xxxlinkxxx.desktop.net.Repository
@@ -236,6 +240,49 @@ private fun AuthedRoot(
     val chatLogs = remember { mutableStateMapOf<String, String>() }
     val scope = rememberCoroutineScope()
 
+    // VoiceCallController lifetime = AuthedRoot lifetime. Disposed on logout
+    // so PeerConnectionFactory + Firestore polling shut down cleanly.
+    var callState: CallUiState by remember { mutableStateOf<CallUiState>(CallUiState.Idle) }
+    var callMuted by remember { mutableStateOf(false) }
+    val callController = remember(repo.localId) {
+        VoiceCallController(repo, turnUsername = null, turnPassword = null) { change ->
+            when (change) {
+                is VoiceCallController.CallStateChange.Outgoing ->
+                    callState = CallUiState.Outgoing(change.peerId)
+                is VoiceCallController.CallStateChange.AcceptingIncoming ->
+                    callState = CallUiState.Outgoing(change.peerId)
+                VoiceCallController.CallStateChange.Connected -> {
+                    val peer = (callState as? CallUiState.Outgoing)?.peerId
+                        ?: (callState as? CallUiState.Active)?.peerId
+                        ?: return@VoiceCallController
+                    callState = CallUiState.Active(peer, System.currentTimeMillis())
+                }
+                VoiceCallController.CallStateChange.Ended -> {
+                    callState = CallUiState.Idle
+                    callMuted = false
+                }
+                is VoiceCallController.CallStateChange.Failed -> {
+                    callState = CallUiState.Idle
+                    callMuted = false
+                }
+                is VoiceCallController.CallStateChange.MuteChanged -> callMuted = change.muted
+                is VoiceCallController.CallStateChange.VoiceUnavailable -> Unit
+            }
+        }
+    }
+    DisposableEffect(callController) {
+        callController.startIncomingWatch { evt ->
+            // Only surface the incoming call if we're not already in one.
+            if (callState is CallUiState.Idle) {
+                callState = CallUiState.Incoming(evt.callerId, evt.callId, evt.sessionId, evt.offerSdp)
+            }
+        }
+        onDispose {
+            callController.stopIncomingWatch()
+            callController.dispose()
+        }
+    }
+
     LaunchedEffect(repo.localId) {
         while (true) {
             runCatching {
@@ -288,8 +335,40 @@ private fun AuthedRoot(
                 }
             },
             onBack = { sub = AuthedSub.ContactList },
+            onCall = {
+                runCatching { callController.startOutgoing(s.peerId) }
+                    .onFailure { /* TODO surface toast in UI */ }
+            },
         )
     }
+
+    CallOverlay(
+        state = callState,
+        muted = callMuted,
+        onAccept = {
+            val inc = callState as? CallUiState.Incoming ?: return@CallOverlay
+            callController.acceptIncoming(inc.callId, inc.callerId, inc.sessionId, inc.offerSdp)
+        },
+        onDecline = {
+            val inc = callState as? CallUiState.Incoming ?: return@CallOverlay
+            scope.launch {
+                runCatching {
+                    repo.firebase.firestoreSet(
+                        "calls/${inc.callId}",
+                        mapOf(
+                            "state" to "declined",
+                            "declinedBy" to repo.localId,
+                            "declinedAt" to System.currentTimeMillis(),
+                        ),
+                        merge = true,
+                    )
+                }
+            }
+            callState = CallUiState.Idle
+        },
+        onHangUp = { callController.hangUp() },
+        onToggleMute = { callController.toggleMute(!callMuted) },
+    )
 }
 
 // ── Contact list ─────────────────────────────────────────────────────────────
@@ -375,6 +454,7 @@ private fun ChatScreen(
     repo: Repository,
     onSend: (String, String) -> Unit,
     onBack: () -> Unit,
+    onCall: () -> Unit,
 ) {
     var input by remember { mutableStateOf("") }
     var fingerprint by remember { mutableStateOf("") }
@@ -397,6 +477,8 @@ private fun ChatScreen(
             } else {
                 Text("(no key yet)", color = TextMuted, style = Mono.copy(fontSize = 11.sp))
             }
+            Spacer(Modifier.width(12.dp))
+            DarkButton(label = "Call", onClick = onCall)
         }
         Spacer(Modifier.height(12.dp))
         Box(Modifier.height(1.dp).fillMaxWidth().background(Line))
