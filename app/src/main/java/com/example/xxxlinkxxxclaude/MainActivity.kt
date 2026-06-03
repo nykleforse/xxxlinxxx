@@ -543,7 +543,12 @@ class MainActivity : AppCompatActivity() {
         ioScope.launch {
             runCatching {
                 val pubkey = b64(kp.public.encoded)
-                val message = "$id\n$uid".toByteArray(Charsets.UTF_8)
+                // ts is included in the signed blob so the server can enforce a
+                // freshness window (±60s). Closes the bindLocalId replay-window
+                // gap and is mandatory in the server fix that re-introduces
+                // stored-pubkey verification for key rotation.
+                val ts = System.currentTimeMillis()
+                val message = "$id\n$uid\n$ts".toByteArray(Charsets.UTF_8)
                 val sig = java.security.Signature.getInstance("SHA256withECDSA").apply {
                     initSign(kp.private)
                     update(message)
@@ -553,7 +558,8 @@ class MainActivity : AppCompatActivity() {
                 val data = hashMapOf(
                     "localId" to id,
                     "pubkey" to pubkey,
-                    "signature" to signature
+                    "signature" to signature,
+                    "ts" to ts
                 )
                 val result = functions.getHttpsCallable("bindLocalId")
                     .call(data).await()

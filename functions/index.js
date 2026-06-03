@@ -40,7 +40,7 @@ exports.bindLocalId = onCall({region: "us-central1"}, async (request) => {
   const uid = request.auth && request.auth.uid;
   if (!uid) throw new HttpsError("unauthenticated", "Sign-in required");
 
-  const {localId, pubkey, signature} = request.data || {};
+  const {localId, pubkey, signature, ts, prevSignature} = request.data || {};
   if (typeof localId !== "string" || !/^[A-Z0-9]{4,32}$/.test(localId)) {
     throw new HttpsError("invalid-argument", "Invalid localId");
   }
@@ -50,23 +50,55 @@ exports.bindLocalId = onCall({region: "us-central1"}, async (request) => {
   if (typeof signature !== "string" || signature.length === 0 || signature.length > 1024) {
     throw new HttpsError("invalid-argument", "Invalid signature");
   }
+  if (typeof ts !== "number" || !Number.isFinite(ts) || !Number.isInteger(ts)) {
+    throw new HttpsError("invalid-argument", "Invalid ts");
+  }
+
+  // ±60s skew window guards against replay and minor clock drift.
+  // The signed blob includes ts, so a captured signature cannot be reused
+  // outside this window.
+  const now = Date.now();
+  if (Math.abs(now - ts) > 60_000) {
+    throw new HttpsError("invalid-argument", "ts outside acceptable window");
+  }
 
   const bindRef = db.collection("bindings").doc(localId);
   const snap = await bindRef.get();
-  const now = Date.now();
 
-  // Verify signature against the SUBMITTED pubkey. If the caller can produce
-  // a valid signature for the (localId, uid) pair under their current private
-  // key, treat them as the legitimate owner — even when the submitted pubkey
-  // differs from the one stored on a previous bind. This accommodates v1 → v2
-  // password upgrade and ordinary password changes, both of which legitimately
-  // rotate the EC keypair derived from photo+password.
-  //
-  // Trade-off: anyone who possesses the photo + password (the identity factors
-  // — see S3 stance) can rotate the binding. This matches the documented
-  // threat model, where photo+password is the canonical credential.
-  if (!verifySignature(localId, uid, pubkey, signature)) {
+  // The submitted pubkey must produce a valid signature over
+  // (localId + "\n" + uid + "\n" + ts). This proves possession of the
+  // private key that pairs with the submitted pubkey — but on its own
+  // does NOT prove ownership of the localId. See the rotation branch
+  // below for that.
+  if (!verifySignature(localId, uid, ts, pubkey, signature)) {
     throw new HttpsError("permission-denied", "Signature invalid");
+  }
+
+  if (snap.exists) {
+    const stored = snap.data();
+    const storedPubkey = stored.pubkey;
+    if (storedPubkey !== pubkey) {
+      // Key rotation. The caller must additionally prove possession of the
+      // OLD private key by signing the same blob with it. This closes the
+      // identity-hijack window that existed in v1.15.6–v1.15.7, where the
+      // server accepted any submitted pubkey on rebind.
+      //
+      // Legitimate rotation paths (v1→v2 upgrade, password change) must
+      // sign with both old and new privkey. They have access to both
+      // because both derive from photo + (old or new) password, and the
+      // user supplies both passwords during the change UI.
+      if (typeof prevSignature !== "string" ||
+          prevSignature.length === 0 ||
+          prevSignature.length > 1024) {
+        throw new HttpsError(
+          "permission-denied",
+          "Rotation requires prevSignature signed by the stored pubkey"
+        );
+      }
+      if (!verifySignature(localId, uid, ts, storedPubkey, prevSignature)) {
+        throw new HttpsError("permission-denied", "prevSignature invalid");
+      }
+    }
   }
   const canonicalPubkey = pubkey;
 
@@ -101,11 +133,11 @@ exports.bindLocalId = onCall({region: "us-central1"}, async (request) => {
   return {ok: true, devices: Object.keys(devices).length};
 });
 
-function verifySignature(localId, uid, pubkeyB64, signatureB64) {
+function verifySignature(localId, uid, ts, pubkeyB64, signatureB64) {
   try {
     const pubkeyDer = Buffer.from(pubkeyB64, "base64");
     const signature = Buffer.from(signatureB64, "base64");
-    const message = Buffer.from(localId + "\n" + uid, "utf8");
+    const message = Buffer.from(localId + "\n" + uid + "\n" + ts, "utf8");
     const pubkey = crypto.createPublicKey({
       key: pubkeyDer,
       format: "der",
