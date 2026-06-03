@@ -66,7 +66,7 @@ class XxxFirebaseMessagingService : FirebaseMessagingService() {
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setDefaults(NotificationCompat.DEFAULT_VIBRATE)
-            .setSound(notificationSound(R.raw.incomming_call))
+            .setSound(notificationSound(R.raw.incoming_call))
             .setVibrate(longArrayOf(0L, 250L, 150L, 250L, 150L, 500L))
             .setBadgeIconType(NotificationCompat.BADGE_ICON_SMALL)
             .setNumber(1)
@@ -98,7 +98,7 @@ class XxxFirebaseMessagingService : FirebaseMessagingService() {
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setDefaults(NotificationCompat.DEFAULT_VIBRATE)
-            .setSound(notificationSound(R.raw.incomming_masege))
+            .setSound(notificationSound(R.raw.incoming_message))
             .setBadgeIconType(NotificationCompat.BADGE_ICON_SMALL)
             .setNumber(count)
             .setContentIntent(contentIntent())
@@ -118,7 +118,7 @@ class XxxFirebaseMessagingService : FirebaseMessagingService() {
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setDefaults(NotificationCompat.DEFAULT_VIBRATE)
-            .setSound(notificationSound(R.raw.incomming_masege))
+            .setSound(notificationSound(R.raw.incoming_message))
             .setBadgeIconType(NotificationCompat.BADGE_ICON_SMALL)
             .setNumber(count)
             .setContentIntent(contentIntent())
@@ -129,8 +129,8 @@ class XxxFirebaseMessagingService : FirebaseMessagingService() {
 
     private fun createNotificationChannels() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        val callSound = notificationSound(R.raw.incomming_call)
-        val messageSound = notificationSound(R.raw.incomming_masege)
+        val callSound = notificationSound(R.raw.incoming_call)
+        val messageSound = notificationSound(R.raw.incoming_message)
         val callAudioAttributes = AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
             .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)

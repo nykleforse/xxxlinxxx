@@ -215,13 +215,18 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private var pendingBackupKey: SecretKey? = null
+    private var pendingBackupPhotoSecret: ByteArray? = null
     private var pendingRestoreUri: android.net.Uri? = null
 
     private val backupFileLauncher = registerForActivityResult(
         ActivityResultContracts.CreateDocument("application/octet-stream")
     ) { uri ->
-        uri?.let { fileUri -> pendingBackupKey?.let { key -> doExportBackup(fileUri, key); pendingBackupKey = null } }
+        uri?.let { fileUri ->
+            pendingBackupPhotoSecret?.let { secret ->
+                doExportBackup(fileUri, secret)
+                pendingBackupPhotoSecret = null
+            }
+        }
     }
 
     private val restoreFileLauncher = registerForActivityResult(
@@ -245,7 +250,7 @@ class MainActivity : AppCompatActivity() {
                     runOnUiThread { Toast.makeText(this@MainActivity, "Photo read failed", Toast.LENGTH_LONG).show() }
                     return@launch
                 }
-                doImportBackup(restoreUri, deriveBackupAesKey(material.secret))
+                doImportBackup(restoreUri, material.secret)
             }
         }
     }
@@ -434,14 +439,14 @@ class MainActivity : AppCompatActivity() {
         val existing = auth.currentUser
         if (existing != null) {
             authUid = existing.uid
-            Log.d(TAG, "Firebase Auth: existing uid=$authUid")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Firebase Auth: existing uid=$authUid")
             onAuthReady()
             return
         }
         auth.signInAnonymously()
             .addOnSuccessListener { result ->
                 authUid = result.user?.uid
-                Log.d(TAG, "Firebase Auth: signed in anonymously uid=$authUid")
+                if (BuildConfig.DEBUG) Log.d(TAG, "Firebase Auth: signed in anonymously uid=$authUid")
                 onAuthReady()
             }
             .addOnFailureListener { e ->
@@ -1174,6 +1179,47 @@ class MainActivity : AppCompatActivity() {
         return PhotoAuthMaterial(secret)
     }
 
+    /**
+     * Visual fingerprint of a peer's public key. Renders SHA-256 of the X.509 DER
+     * pubkey as 8 emoji from a fixed alphabet — users can compare them out-of-band
+     * (call/photo) to detect MITM key substitution. Equivalent to Signal "safety
+     * numbers" but compact enough to fit in a chat title row.
+     *
+     * Returns empty string if the pubkey hasn't been fetched yet for this contact.
+     */
+    /**
+     * Fetches peer's pubkey (cached) and shows the fingerprint emoji row in the
+     * chat header. Hidden until the lookup resolves.
+     */
+    private fun loadPeerFingerprint(id: String) {
+        binding.chatPeerId.visibility = View.GONE
+        ioScope.launch {
+            val pubkey = runCatching {
+                db?.collection("users")?.document(id)?.get()?.await()
+                    ?.getString("messagePublicKey")
+            }.getOrNull()
+            val print = pubkeyFingerprint(pubkey)
+            withContext(Dispatchers.Main) {
+                if (remoteId == id && print.isNotEmpty()) {
+                    binding.chatPeerId.text = print
+                    binding.chatPeerId.visibility = View.VISIBLE
+                }
+            }
+        }
+    }
+
+    private fun pubkeyFingerprint(pubkeyB64: String?): String {
+        if (pubkeyB64.isNullOrBlank()) return ""
+        val bytes = runCatching { b64decode(pubkeyB64) }.getOrNull() ?: return ""
+        val hash = sha256(bytes)
+        val sb = StringBuilder(8)
+        for (i in 0 until 8) {
+            val idx = hash[i].toInt() and (FINGERPRINT_ALPHABET.size - 1)
+            sb.append(FINGERPRINT_ALPHABET[idx])
+        }
+        return sb.toString()
+    }
+
     /** 8-char uppercase hex ID, derived deterministically from photo secret. */
     private fun deriveLocalId(photoSecret: ByteArray): String =
         sha256("xlink-id-v1:".toByteArray(Charsets.UTF_8) + photoSecret)
@@ -1593,6 +1639,10 @@ class MainActivity : AppCompatActivity() {
         remoteId = id
         binding.chatTitle.text = contactName(id)
         updateAddContactBanner(id)
+        // Async fetch + display peer pubkey visual fingerprint so the user can
+        // verify identity out-of-band. Detects MITM key substitution in
+        // /users/{id}.messagePublicKey or bindings/{id}.pubkey.
+        loadPeerFingerprint(id)
         // Reset search when switching chats
         chatSearchQuery = ""
         binding.chatSearchInput.text?.clear()
@@ -1698,8 +1748,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        val callSound = notificationSound(R.raw.incomming_call)
-        val messageSound = notificationSound(R.raw.incomming_masege)
+        val callSound = notificationSound(R.raw.incoming_call)
+        val messageSound = notificationSound(R.raw.incoming_message)
         val callAudioAttributes = AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
             .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
@@ -1760,7 +1810,7 @@ class MainActivity : AppCompatActivity() {
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setDefaults(NotificationCompat.DEFAULT_VIBRATE)
-            .setSound(notificationSound(R.raw.incomming_call))
+            .setSound(notificationSound(R.raw.incoming_call))
             .setVibrate(longArrayOf(0L, 250L, 150L, 250L))
             .setBadgeIconType(NotificationCompat.BADGE_ICON_SMALL)
             .setNumber(1)
@@ -1790,7 +1840,7 @@ class MainActivity : AppCompatActivity() {
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setDefaults(NotificationCompat.DEFAULT_VIBRATE)
-            .setSound(notificationSound(R.raw.incomming_masege))
+            .setSound(notificationSound(R.raw.incoming_message))
             .setBadgeIconType(NotificationCompat.BADGE_ICON_SMALL)
             .setNumber(count)
             .setContentIntent(contentIntent())
@@ -3268,7 +3318,11 @@ class MainActivity : AppCompatActivity() {
         if (storedHash == null || storedSalt == null) { hideLockScreen(); return }
 
         val enteredHash = hashPin(pin, b64decode(storedSalt))
-        if (enteredHash == storedHash) {
+        // Constant-time compare: String == leaks timing on per-character mismatch
+        // position, letting an attacker grind toward the right prefix.
+        if (java.security.MessageDigest.isEqual(
+                enteredHash.toByteArray(Charsets.UTF_8),
+                storedHash.toByteArray(Charsets.UTF_8))) {
             prefs.edit()
                 .putInt(KEY_PIN_FAILURES, 0)
                 .putLong(KEY_PIN_LOCKOUT_UNTIL, 0L)
@@ -3278,16 +3332,19 @@ class MainActivity : AppCompatActivity() {
             val newFailures = failures + 1
             val edit = prefs.edit().putInt(KEY_PIN_FAILURES, newFailures)
             // Exponential backoff after 3 failures: 30s, 60s, 120s, 240s, ...
-            // After 10 failures total: clear PIN and force re-setup (no auto-wipe of data).
+            // After 10 failures total: WIPE all crypto material + chat logs + contacts.
+            // Previously only PIN was cleared, leaving the attacker with full account
+            // access by simply reinstalling. Wipe is the only sane response to N PIN
+            // failures on a device the attacker physically holds.
             if (newFailures >= 10) {
-                edit.putBoolean(KEY_APP_LOCK_ENABLED, false)
-                    .remove(KEY_APP_PIN_HASH)
-                    .remove(KEY_APP_PIN_SALT)
-                    .putInt(KEY_PIN_FAILURES, 0)
-                    .putLong(KEY_PIN_LOCKOUT_UNTIL, 0L)
-                    .apply()
-                Toast.makeText(this, "Too many failed attempts — app lock disabled. Re-enable from settings.", Toast.LENGTH_LONG).show()
-                hideLockScreen()
+                Log.w(TAG, "PIN brute-force threshold reached — wiping local account")
+                Toast.makeText(this,
+                    "Too many failed attempts — local account wiped",
+                    Toast.LENGTH_LONG).show()
+                // doLogout() handles: cancel jobs/listeners, clear all prefs, delete
+                // photo files, recreate() into the photo-auth screen. Same teardown
+                // as voluntary logout — but here it's forced by N PIN failures.
+                doLogout()
                 return
             }
             if (newFailures >= 3) {
@@ -3434,12 +3491,22 @@ class MainActivity : AppCompatActivity() {
     // ─── Backup / Restore ────────────────────────────────────────────────────
 
     /**
-     * Derives a backup-specific AES-256 key from the photo account secret.
-     * Uses domain separation so the backup key is distinct from other uses of secret.
+     * Legacy v2 derivation (single SHA-256). Kept for restoring older backup files.
+     * v3 backups use PBKDF2 with a per-backup random salt instead.
      */
-    private fun deriveBackupAesKey(photoSecret: ByteArray): SecretKey {
+    private fun deriveBackupAesKeyV2(photoSecret: ByteArray): SecretKey {
         val info = "xlink-backup-v1:".toByteArray(Charsets.UTF_8)
         return SecretKeySpec(sha256(info + photoSecret), "AES")
+    }
+
+    /**
+     * v3 derivation: PBKDF2-HMAC-SHA256 over the photo secret with a random 16-byte
+     * salt + 600k iterations. Per-backup salt means two backups from the same photo
+     * yield different ciphertexts; PBKDF2 iterations defeat GPU brute-force.
+     */
+    private fun deriveBackupAesKeyV3(photoSecret: ByteArray, salt: ByteArray): SecretKey {
+        val derived = pbkdf2(photoSecret, salt, BACKUP_PBKDF2_ITERS, 32)
+        return SecretKeySpec(derived, "AES")
     }
 
     private fun exportBackupWithPhotoKey() {
@@ -3448,7 +3515,7 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "Log in with your photo first", Toast.LENGTH_LONG).show()
             return
         }
-        pendingBackupKey = deriveBackupAesKey(b64decode(secretB64))
+        pendingBackupPhotoSecret = b64decode(secretB64)
         backupFileLauncher.launch("xlink_backup_${System.currentTimeMillis()}.xlinkbak")
     }
 
@@ -3496,20 +3563,23 @@ class MainActivity : AppCompatActivity() {
         edit.apply()
     }
 
-    private fun doExportBackup(uri: android.net.Uri, key: SecretKey) {
+    private fun doExportBackup(uri: android.net.Uri, photoSecret: ByteArray) {
         ioScope.launch {
             try {
                 val plaintext = buildBackupJson().toByteArray(Charsets.UTF_8)
                 val iv = ByteArray(BACKUP_IV_BYTES).also { SecureRandom().nextBytes(it) }
+                val salt = ByteArray(BACKUP_SALT_BYTES).also { SecureRandom().nextBytes(it) }
+                val key = deriveBackupAesKeyV3(photoSecret, salt)
 
                 val cipher = Cipher.getInstance("AES/GCM/NoPadding")
                 cipher.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(128, iv))
                 val ciphertext = cipher.doFinal(plaintext)
 
-                // File format v2: [magic:8][version:1][iv:12][ciphertext]
+                // File format v3: [magic:8][version:1=3][salt:16][iv:12][ciphertext]
                 contentResolver.openOutputStream(uri)?.use { out ->
                     out.write(BACKUP_MAGIC.toByteArray(Charsets.US_ASCII)) // 8 bytes
-                    out.write(BACKUP_VERSION)                               // 1 byte
+                    out.write(BACKUP_VERSION)                               // 1 byte (= 3)
+                    out.write(salt)                                         // 16 bytes
                     out.write(iv)                                           // 12 bytes
                     out.write(ciphertext)
                 }
@@ -3521,21 +3591,35 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun doImportBackup(uri: android.net.Uri, key: SecretKey) {
+    private fun doImportBackup(uri: android.net.Uri, photoSecret: ByteArray) {
         ioScope.launch {
             try {
                 val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
                     ?: throw Exception("Cannot open file")
 
-                // Header: 8 (magic) + 1 (version) + 12 (iv) = 21 bytes minimum
                 if (bytes.size < 21) throw Exception("File too small")
                 val magic = String(bytes, 0, 8, Charsets.US_ASCII)
                 if (magic != BACKUP_MAGIC) throw Exception("Not an xlink backup file")
                 val version = bytes[8].toInt() and 0xFF
-                if (version != BACKUP_VERSION) throw Exception("Unsupported backup version $version")
 
-                val iv = bytes.copyOfRange(9, 9 + BACKUP_IV_BYTES)
-                val ciphertext = bytes.copyOfRange(9 + BACKUP_IV_BYTES, bytes.size)
+                val (key, iv, ciphertext) = when (version) {
+                    2 -> {
+                        // v2: [magic:8][version:1][iv:12][ciphertext]
+                        val iv = bytes.copyOfRange(9, 9 + BACKUP_IV_BYTES)
+                        val ciphertext = bytes.copyOfRange(9 + BACKUP_IV_BYTES, bytes.size)
+                        Triple(deriveBackupAesKeyV2(photoSecret), iv, ciphertext)
+                    }
+                    3 -> {
+                        // v3: [magic:8][version:1][salt:16][iv:12][ciphertext]
+                        if (bytes.size < 9 + BACKUP_SALT_BYTES + BACKUP_IV_BYTES) throw Exception("v3 header truncated")
+                        val salt = bytes.copyOfRange(9, 9 + BACKUP_SALT_BYTES)
+                        val ivOffset = 9 + BACKUP_SALT_BYTES
+                        val iv = bytes.copyOfRange(ivOffset, ivOffset + BACKUP_IV_BYTES)
+                        val ciphertext = bytes.copyOfRange(ivOffset + BACKUP_IV_BYTES, bytes.size)
+                        Triple(deriveBackupAesKeyV3(photoSecret, salt), iv, ciphertext)
+                    }
+                    else -> throw Exception("Unsupported backup version $version")
+                }
 
                 val cipher = Cipher.getInstance("AES/GCM/NoPadding")
                 cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, iv))
@@ -5391,7 +5475,23 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_PIN_FAILURES = "app_pin_failures"
         private const val KEY_PIN_LOCKOUT_UNTIL = "app_pin_lockout_until"
         private const val BACKUP_MAGIC = "XLINKBAK"
-        private const val BACKUP_VERSION = 2   // v2 = photo-key (no password/PBKDF2)
+        // v3 = PBKDF2 + random 16-byte salt (defeats GPU brute force).
+        // v2 = legacy SHA-256 derivation; still supported on import.
+        private const val BACKUP_VERSION = 3
+        private const val BACKUP_SALT_BYTES = 16
+        private const val BACKUP_PBKDF2_ITERS = 600_000
+
+        /** 64-emoji alphabet (power of 2 so byte → index is a simple AND mask). */
+        private val FINGERPRINT_ALPHABET = arrayOf(
+            "🍎","🍊","🍋","🍉","🍇","🍓","🍒","🍑",
+            "🥑","🥕","🌽","🍔","🍕","🍩","🍪","🍫",
+            "🐱","🐶","🐭","🐹","🐰","🦊","🐻","🐼",
+            "🦁","🐯","🐮","🐷","🐸","🐵","🐔","🦉",
+            "🌸","🌺","🌻","🌷","🌹","🍀","🌳","🌵",
+            "🚀","✈️","🚂","🚗","⛵","🏎️","🛸","🚲",
+            "⚽","🏀","🏈","🎾","🎸","🎺","🎷","🎹",
+            "🌙","⭐","☀️","🌈","❄️","🔥","💧","🌊"
+        )
         private const val BACKUP_IV_BYTES = 12
         private const val KEY_BACKUP_LAST_PATH = "backup_last_path"
         private const val KEY_SEEN_MESSAGE_IDS = "seen_message_ids"
