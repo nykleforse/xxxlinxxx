@@ -52,6 +52,7 @@ import com.example.xxxlinkxxx.desktop.security.BackupCodec
 import com.example.xxxlinkxxx.desktop.security.PinLock
 import com.example.xxxlinkxxx.desktop.storage.SecurePrefs
 import com.example.xxxlinkxxx.desktop.update.UpdateChecker
+import com.example.xxxlinkxxx.desktop.util.EventLog
 import java.awt.Desktop
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -61,21 +62,28 @@ import java.awt.FileDialog
 import java.awt.Frame
 import java.io.File
 
-// ── Design tokens (mirror Android colors.xml) ────────────────────────────────
+// ── Design tokens (drawer-style dark, v1.15.5 Android parity) ────────────────
 
-private val Bg = Color(0xFF000000)
-private val Surface = Color(0xFF101010)
-private val Line = Color(0xFF333333)
-private val TextPrimary = Color(0xFFB8B8B8)
-private val TextSecondary = Color(0xFF888888)
-private val TextMuted = Color(0xFF5F5F5F)
+private val Bg = Color(0xFF0A0A0A)
+private val Surface = Color(0xFF141414)
+private val SurfaceElev = Color(0xFF1C1C1C)
+private val Line = Color(0xFF2A2A2A)
+private val TextPrimary = Color(0xFFE6E6E6)
+private val TextSecondary = Color(0xFF9A9A9A)
+private val TextMuted = Color(0xFF606060)
 private val Accent = Color(0xFF4FC3F7)
+private val AccentSoft = Color(0xFF1A3A4A)
+private val BubbleMe = Color(0xFF22384B)
+private val BubblePeer = Color(0xFF1C1C1C)
+private val Danger = Color(0xFFE07070)
 
 private val Mono = TextStyle(
     color = TextPrimary,
-    fontFamily = FontFamily.Monospace,
-    fontSize = 14.sp,
+    fontFamily = FontFamily.SansSerif,
+    fontSize = 13.sp,
 )
+private val Hdr = Mono.copy(fontSize = 18.sp, color = TextPrimary)
+private val Sub = Mono.copy(fontSize = 11.sp, color = TextSecondary)
 
 // ── Firebase project constants (mirror app/google-services.json) ─────────────
 
@@ -265,6 +273,10 @@ private fun AuthedRoot(
     var pinAttempt by remember { mutableStateOf("") }
     var settingsOpen by remember { mutableStateOf(false) }
     var settingsMsg by remember { mutableStateOf("") }
+    var logOpen by remember { mutableStateOf(false) }
+    var updateInfo by remember { mutableStateOf<UpdateChecker.UpdateInfo?>(null) }
+    var updateMsg by remember { mutableStateOf("") }
+    var refreshTick by remember { mutableStateOf(0) }
     val groupRepo = remember(repo.localId) { GroupRepository(repo, prefs) }
     val groups = remember {
         mutableStateListOf<String>().also { it.addAll(groupRepo.savedGroupIds()) }
@@ -338,10 +350,16 @@ private fun AuthedRoot(
         }
     }
 
-    LaunchedEffect(repo.localId) {
+    LaunchedEffect(repo.localId, refreshTick) {
+        // First pass runs immediately (refreshTick changes invalidate the
+        // effect so the Refresh button bypasses the 5s wait).
+        EventLog.log("INBOX", "poll loop start (refresh tick=$refreshTick)")
         while (true) {
             runCatching {
                 val msgs = repo.pollInbox()
+                if (msgs.isNotEmpty()) {
+                    EventLog.log("INBOX", "${msgs.size} new msg(s)")
+                }
                 for (m in msgs) {
                     val gid = m.groupId
                     if (gid != null) {
@@ -360,8 +378,20 @@ private fun AuthedRoot(
                     }
                     runCatching { repo.writeReceipt(m.id, m.from) }
                 }
-            }
+            }.onFailure { e -> EventLog.log("INBOX", "poll failure: ${e.message}") }
             delay(5_000)
+        }
+    }
+
+    // Background update check on startup — surface a banner if newer
+    // release is available, no auto-download.
+    LaunchedEffect(Unit) {
+        runCatching {
+            val info = UpdateChecker.checkLatest()
+            if (info != null) {
+                updateInfo = info
+                EventLog.log("UPDATE", "newer release: v${info.version}")
+            }
         }
     }
 
@@ -400,6 +430,25 @@ private fun AuthedRoot(
             contacts = contacts,
             groups = groups,
             groupName = { id -> groupRepo.groupName(id) },
+            updateBanner = updateInfo?.let { "v${it.version} available" },
+            onUpdate = if (updateInfo != null) ({
+                val info = updateInfo!!
+                updateMsg = "Downloading v${info.version}..."
+                scope.launch {
+                    runCatching {
+                        val file = UpdateChecker.downloadMsi(info) { got, total ->
+                            if (total > 0) updateMsg = "Updating: ${(got * 100 / total)}%"
+                        }
+                        updateMsg = "Launching installer..."
+                        runCatching { Desktop.getDesktop().open(file) }
+                    }.onFailure { updateMsg = "Update failed: ${it.message}" }
+                }
+            }) else null,
+            updateProgress = updateMsg,
+            onRefresh = {
+                refreshTick++
+                EventLog.log("UI", "manual refresh tap")
+            },
             onAdd = { sub = AuthedSub.AddContact },
             onNewGroup = { sub = AuthedSub.NewGroup },
             onPick = { sub = AuthedSub.Chat(it) },
@@ -522,6 +571,7 @@ private fun AuthedRoot(
                         settingsMsg = "You're on the latest (${UpdateChecker.CURRENT_VERSION})"
                         return@launch
                     }
+                    updateInfo = info
                     settingsMsg = "Downloading ${info.version}..."
                     runCatching {
                         val file = UpdateChecker.downloadMsi(info) { got, total ->
@@ -535,10 +585,22 @@ private fun AuthedRoot(
                     }.onFailure { settingsMsg = "Update failed: ${it.message}" }
                 }
             },
+            onShowLog = {
+                settingsOpen = false
+                logOpen = true
+            },
             onClose = {
                 settingsOpen = false
                 settingsMsg = ""
             },
+        )
+    }
+
+    if (logOpen) {
+        LogOverlay(
+            lines = EventLog.lines,
+            onClear = { EventLog.clear() },
+            onClose = { logOpen = false },
         )
     }
 
@@ -601,21 +663,50 @@ private fun ContactListScreen(
     contacts: List<String>,
     groups: List<String>,
     groupName: (String) -> String,
+    updateBanner: String?,
+    onUpdate: (() -> Unit)?,
+    updateProgress: String,
+    onRefresh: () -> Unit,
     onAdd: () -> Unit,
     onNewGroup: () -> Unit,
     onPick: (String) -> Unit,
     onLogout: () -> Unit,
     onSettings: () -> Unit,
 ) {
-    Column(Modifier.fillMaxSize().padding(16.dp)) {
+    Column(Modifier.fillMaxSize().padding(20.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Chats", color = TextPrimary, style = Mono.copy(fontSize = 16.sp))
-            Spacer(Modifier.width(12.dp))
-            Text("My ID: $localId", color = TextMuted, style = Mono.copy(fontSize = 11.sp))
+            Column {
+                Text("Chats", color = TextPrimary, style = Hdr)
+                Text("ID: $localId", color = TextSecondary, style = Sub)
+            }
+            Spacer(Modifier.width(24.dp))
+            DarkButton(label = "↻", onClick = onRefresh)
         }
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(14.dp))
+
+        if (updateBanner != null && onUpdate != null) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .background(AccentSoft, RoundedCornerShape(8.dp))
+                    .border(1.dp, Accent, RoundedCornerShape(8.dp))
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("Update available", color = Accent, style = Mono.copy(fontSize = 12.sp))
+                    Text(updateBanner, color = TextPrimary, style = Sub)
+                    if (updateProgress.isNotEmpty()) {
+                        Text(updateProgress, color = TextSecondary, style = Sub)
+                    }
+                }
+                AccentButton(label = "Update", onClick = onUpdate)
+            }
+            Spacer(Modifier.height(12.dp))
+        }
+
         Row {
-            DarkButton(label = "+ Add", onClick = onAdd)
+            AccentButton(label = "+ Contact", onClick = onAdd)
             Spacer(Modifier.width(8.dp))
             DarkButton(label = "+ Group", onClick = onNewGroup)
             Spacer(Modifier.width(8.dp))
@@ -623,42 +714,61 @@ private fun ContactListScreen(
             Spacer(Modifier.width(8.dp))
             DarkButton(label = "Log out", onClick = onLogout)
         }
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(14.dp))
         Box(Modifier.height(1.dp).fillMaxWidth().background(Line))
         Spacer(Modifier.height(8.dp))
 
         if (contacts.isEmpty() && groups.isEmpty()) {
-            Text(
-                "No contacts or groups yet. Press + Add (peer ID) or + Group.",
-                color = TextMuted,
-                style = Mono.copy(fontSize = 12.sp),
-                modifier = Modifier.padding(top = 24.dp),
-            )
+            Column(
+                Modifier.fillMaxSize().padding(top = 48.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text("No conversations yet", color = TextSecondary, style = Mono.copy(fontSize = 13.sp))
+                Spacer(Modifier.height(4.dp))
+                Text("Tap +Contact and enter your friend's 8-char ID",
+                    color = TextMuted, style = Sub)
+            }
         } else {
             LazyColumn(Modifier.fillMaxSize()) {
                 items(groups) { gid ->
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .clickable { onPick(gid) }
-                            .padding(vertical = 10.dp),
-                    ) {
-                        Text("👥 ${groupName(gid)}", color = TextPrimary, style = Mono)
-                    }
+                    ContactRow(
+                        icon = "👥",
+                        title = groupName(gid),
+                        subtitle = "group",
+                        onClick = { onPick(gid) },
+                    )
                 }
                 items(contacts) { id ->
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .clickable { onPick(id) }
-                            .padding(vertical = 10.dp),
-                    ) {
-                        Text(id, color = TextPrimary, style = Mono)
-                    }
+                    ContactRow(
+                        icon = "👤",
+                        title = id,
+                        subtitle = "direct chat",
+                        onClick = { onPick(id) },
+                    )
                 }
             }
         }
     }
+}
+
+@Composable
+private fun ContactRow(icon: String, title: String, subtitle: String, onClick: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .background(Surface, RoundedCornerShape(8.dp))
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(icon, style = Mono.copy(fontSize = 18.sp))
+        Spacer(Modifier.width(12.dp))
+        Column {
+            Text(title, color = TextPrimary, style = Mono.copy(fontSize = 14.sp))
+            Text(subtitle, color = TextMuted, style = Sub)
+        }
+    }
+    Spacer(Modifier.height(4.dp))
 }
 
 // ── New group ────────────────────────────────────────────────────────────────
@@ -889,47 +999,71 @@ private fun ChatScreen(
  */
 @Composable
 private fun MessageRow(msg: ChatMessage, replyPreview: String?, onReply: () -> Unit) {
-    Column(
+    val isMe = msg.author == "Me"
+    Row(
         Modifier
             .fillMaxWidth()
-            .clickable(onClick = onReply)
-            .padding(vertical = 4.dp),
+            .padding(vertical = 3.dp),
+        horizontalArrangement = if (isMe) Arrangement.End else Arrangement.Start,
     ) {
-        if (replyPreview != null) {
-            Text(
-                "↳ $replyPreview",
-                color = TextMuted,
-                style = Mono.copy(fontSize = 10.sp),
-                modifier = Modifier.padding(start = 14.dp),
-            )
-        }
-        Row {
-            val authorColor = if (msg.author == "Me") Accent else TextSecondary
-            Text(
-                "${msg.author}: ",
-                color = authorColor,
-                style = Mono.copy(fontSize = 12.sp),
-            )
+        Column(
+            Modifier
+                .background(
+                    if (isMe) BubbleMe else BubblePeer,
+                    RoundedCornerShape(
+                        topStart = 12.dp,
+                        topEnd = 12.dp,
+                        bottomStart = if (isMe) 12.dp else 2.dp,
+                        bottomEnd = if (isMe) 2.dp else 12.dp,
+                    ),
+                )
+                .clickable(onClick = onReply)
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+        ) {
+            if (!isMe) {
+                Text(
+                    msg.author,
+                    color = Accent,
+                    style = Mono.copy(fontSize = 11.sp),
+                    modifier = Modifier.padding(bottom = 2.dp),
+                )
+            }
+            if (replyPreview != null) {
+                Column(
+                    Modifier
+                        .background(Color(0x33000000), RoundedCornerShape(4.dp))
+                        .padding(horizontal = 6.dp, vertical = 4.dp),
+                ) {
+                    Text(
+                        "↳ $replyPreview",
+                        color = TextMuted,
+                        style = Mono.copy(fontSize = 10.sp),
+                    )
+                }
+                Spacer(Modifier.height(4.dp))
+            }
             val photoPath = parsePhotoPath(msg.text)
             if (photoPath != null) {
                 Text(
                     "📷 ${File(photoPath).name}",
                     color = Accent,
-                    style = Mono.copy(fontSize = 12.sp),
+                    style = Mono.copy(fontSize = 13.sp),
                     modifier = Modifier.clickable {
                         runCatching { Desktop.getDesktop().open(File(photoPath)) }
                     },
                 )
             } else {
-                Text(msg.text, color = TextPrimary, style = Mono.copy(fontSize = 12.sp))
+                Text(msg.text, color = TextPrimary, style = Mono.copy(fontSize = 13.sp))
             }
-            if (msg.author == "Me") {
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    statusTick(msg.status),
-                    color = if (msg.status == MsgStatus.READ) Accent else TextMuted,
-                    style = Mono.copy(fontSize = 11.sp),
-                )
+            if (isMe) {
+                Row(Modifier.padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Spacer(Modifier.width(0.dp))
+                    Text(
+                        statusTick(msg.status),
+                        color = if (msg.status == MsgStatus.READ) Accent else TextMuted,
+                        style = Mono.copy(fontSize = 10.sp),
+                    )
+                }
             }
         }
     }
@@ -973,12 +1107,25 @@ private fun appendMessage(
 private fun DarkButton(label: String, onClick: () -> Unit, enabled: Boolean = true) {
     Box(
         Modifier
-            .background(if (enabled) Surface else Color(0xFF080808), RoundedCornerShape(6.dp))
-            .border(1.dp, Line, RoundedCornerShape(6.dp))
+            .background(if (enabled) SurfaceElev else Color(0xFF0E0E0E), RoundedCornerShape(8.dp))
+            .border(1.dp, Line, RoundedCornerShape(8.dp))
             .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 14.dp, vertical = 8.dp),
     ) {
         Text(label, color = if (enabled) TextPrimary else TextMuted, style = Mono.copy(fontSize = 12.sp))
+    }
+}
+
+@Composable
+private fun AccentButton(label: String, onClick: () -> Unit, enabled: Boolean = true) {
+    Box(
+        Modifier
+            .background(if (enabled) Accent else Color(0xFF223340), RoundedCornerShape(8.dp))
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+    ) {
+        Text(label, color = if (enabled) Bg else TextMuted,
+            style = Mono.copy(fontSize = 12.sp))
     }
 }
 
@@ -1088,6 +1235,65 @@ private fun keyPairFromPrefs(prefs: SecurePrefs, photoSecret: ByteArray): java.s
 // ── Lock + Settings overlays ─────────────────────────────────────────────────
 
 @Composable
+private fun LogOverlay(
+    lines: SnapshotStateList<String>,
+    onClear: () -> Unit,
+    onClose: () -> Unit,
+) {
+    Box(
+        Modifier.fillMaxSize().background(Color(0xEE000000)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            Modifier
+                .width(600.dp)
+                .height(480.dp)
+                .background(Surface, RoundedCornerShape(10.dp))
+                .border(1.dp, Line, RoundedCornerShape(10.dp))
+                .padding(16.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Event log", color = TextPrimary, style = Hdr)
+                Spacer(Modifier.width(8.dp))
+                Text("(${lines.size} lines)", color = TextMuted, style = Sub)
+            }
+            Spacer(Modifier.height(12.dp))
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(360.dp)
+                    .background(Bg, RoundedCornerShape(4.dp))
+                    .padding(8.dp),
+            ) {
+                if (lines.isEmpty()) {
+                    Text("(empty)", color = TextMuted, style = Sub)
+                } else {
+                    LazyColumn(Modifier.fillMaxSize()) {
+                        items(lines.size) { idx ->
+                            Text(
+                                lines[idx],
+                                color = TextSecondary,
+                                style = TextStyle(
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 10.sp,
+                                    color = TextSecondary,
+                                ),
+                            )
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            Row {
+                DarkButton(label = "Clear", onClick = onClear)
+                Spacer(Modifier.width(8.dp))
+                DarkButton(label = "Close", onClick = onClose)
+            }
+        }
+    }
+}
+
+@Composable
 private fun LockOverlay(
     pin: String,
     onPinChange: (String) -> Unit,
@@ -1135,6 +1341,7 @@ private fun SettingsOverlay(
     onExportBackup: () -> Unit,
     onImportBackup: () -> Unit,
     onCheckForUpdates: () -> Unit,
+    onShowLog: () -> Unit,
     onClose: () -> Unit,
 ) {
     var newPin by remember { mutableStateOf("") }
@@ -1198,7 +1405,11 @@ private fun SettingsOverlay(
                 color = TextMuted, style = Mono.copy(fontSize = 11.sp),
             )
             Spacer(Modifier.height(8.dp))
-            DarkButton(label = "Check for updates", onClick = onCheckForUpdates)
+            Row {
+                DarkButton(label = "Check for updates", onClick = onCheckForUpdates)
+                Spacer(Modifier.width(8.dp))
+                DarkButton(label = "View log", onClick = onShowLog)
+            }
             if (statusMessage.isNotEmpty()) {
                 Spacer(Modifier.height(12.dp))
                 Text(statusMessage, color = TextSecondary, style = Mono.copy(fontSize = 11.sp))

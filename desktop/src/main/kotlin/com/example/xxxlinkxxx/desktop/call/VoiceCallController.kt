@@ -4,6 +4,7 @@ import com.example.p2pcodec2.Codec2Bridge
 import com.example.xxxlinkxxx.desktop.audio.Codec2Loader
 import com.example.xxxlinkxxx.desktop.audio.JvmAudioEngine
 import com.example.xxxlinkxxx.desktop.net.Repository
+import com.example.xxxlinkxxx.desktop.util.EventLog
 import dev.onvoid.webrtc.PeerConnectionFactory
 import dev.onvoid.webrtc.PeerConnectionObserver
 import dev.onvoid.webrtc.RTCAnswerOptions
@@ -212,6 +213,7 @@ class VoiceCallController(
     /** Begin watching for incoming calls. Caller wires this once per session. */
     fun startIncomingWatch(onIncoming: (IncomingCallEvent) -> Unit) {
         if (!pollingActive.compareAndSet(false, true)) return
+        EventLog.log("CALL", "incoming watch started, localId=${repo.localId}")
         pollingJob = scope.launch {
             while (pollingActive.get()) {
                 runCatching {
@@ -223,13 +225,25 @@ class VoiceCallController(
                         ),
                         limit = 5,
                     )
+                    if (docs.isNotEmpty()) {
+                        EventLog.log("CALL", "poll: ${docs.size} ringing doc(s) for me")
+                    }
                     for ((id, fields) in docs) {
                         val callerId = fields["callerId"] as? String ?: continue
-                        val sid = fields["sessionId"] as? String ?: continue
+                        // Android publishes `sessionId` as a long timestamp on
+                        // some builds and a string on others. Accept both.
+                        val sid = (fields["sessionId"] as? String)
+                            ?: (fields["sessionId"] as? Long)?.toString()
+                            ?: continue
+                        // Android writes offer either as a plain SDP string
+                        // (v1.14.x+) or as { type, sdp } map (older). Try both.
                         val offerSdp = (fields["offer"] as? Map<*, *>)?.get("sdp") as? String
                             ?: fields["offer"] as? String ?: continue
+                        EventLog.log("CALL", "incoming from $callerId callId=$id")
                         onIncoming(IncomingCallEvent(id, callerId, sid, offerSdp))
                     }
+                }.onFailure { e ->
+                    EventLog.log("CALL", "poll failure: ${e.message}")
                 }
                 delay(3_000)
             }

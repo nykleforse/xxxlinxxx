@@ -1,5 +1,6 @@
 package com.example.xxxlinkxxx.desktop.net
 
+import com.example.xxxlinkxxx.desktop.util.EventLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -53,6 +54,7 @@ class FirebaseClient(
         uid = obj.getString("localId")
         val expiresIn = obj.getString("expiresIn").toLong()
         tokenExpiresAtMs = System.currentTimeMillis() + expiresIn * 1000 - 60_000
+        EventLog.log("AUTH", "anon sign-in ok, uid=${uid?.take(8)}...")
         AuthResult(uid!!, idToken!!)
     }
 
