@@ -176,20 +176,6 @@
                     android:orientation="vertical" />
             </ScrollView>
 
-            <Button
-                android:id="@+id/btnOpenAddContact"
-                android:layout_width="56dp"
-                android:layout_height="56dp"
-                android:layout_marginBottom="8dp"
-                android:background="@drawable/bg_add_contact_fab"
-                android:gravity="center"
-                android:includeFontPadding="false"
-                android:minWidth="0dp"
-                android:minHeight="0dp"
-                android:padding="0dp"
-                android:text="+"
-                android:textColor="@color/text_secondary"
-                android:textSize="28sp" />
         </LinearLayout>
 
         <!-- ADD CONTACT -->

@@ -885,7 +885,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun bindUI() {
         binding.btnBack.setOnClickListener { showContactList() }
-        binding.btnOpenAddContact.setOnClickListener { showAddContactScreen() }
         binding.btnBackFromAddContact.setOnClickListener { showContactList() }
 
         // Drawer
