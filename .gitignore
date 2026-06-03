@@ -1,29 +1,31 @@
+# Build / IDE artifacts
 *.iml
-.gradle
-/local.properties
-/.idea/caches
-/.idea/libraries
-/.idea/modules.xml
-/.idea/workspace.xml
-/.idea/navEditor.xml
-/.idea/assetWizardSettings.xml
-.idea/
-.DS_Store
+.gradle/
 /build
 /captures
-.externalNativeBuild
-.cxx
-app/.cxx
+.idea/
+.DS_Store
+
+# Native build caches
+.externalNativeBuild/
+.cxx/
+app/.cxx/
+.kotlin/
+
+# Secrets / local config
 local.properties
-node_modules/
-functions/node_modules/
+app/signing/
+
+# Firebase tooling
 firebase-debug.log
 firebase-debug.*.log
-app/signing/
-# uiautomator window dumps
+functions/node_modules/
+node_modules/
+
+# uiautomator session dumps
 *_window_*.xml
-# Android Studio
-.idea/
-*.iml
-captures/
-.kotlin/
+
+# Misc OS / editor
+*.swp
+*.swo
+Thumbs.db
