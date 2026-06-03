@@ -4944,6 +4944,26 @@ class MainActivity : AppCompatActivity() {
         ivB64: String
     ) {
         val firestore = db ?: return
+        // Sender-side answer timeout: if the receiver never moves the doc out
+        // of 'pending' within PHOTO_ANSWER_TIMEOUT_MS (peer offline / app
+        // closed / busy on stale transfer), bail and mark the doc 'expired'
+        // so the local PC is torn down. Without this, photoTransferPc stays
+        // alive indefinitely and every subsequent incoming offer from the
+        // same peer is rejected as busy.
+        val timeoutHandler = android.os.Handler(mainLooper)
+        val timeoutTask = Runnable {
+            if (outgoingPhotoTransferId != transferId) return@Runnable
+            Log.w(TAG, "XLINK_PHOTO answer timeout tid=$transferId — no reply within ${PHOTO_ANSWER_TIMEOUT_MS}ms")
+            firestore.collection("transfers").document(transferId)
+                .update("state", "expired")
+                .addOnFailureListener { e -> Log.w(TAG, "XLINK_PHOTO expired write failed: ${e.message}") }
+            runOnUiThread {
+                Toast.makeText(this, "Photo not delivered (recipient offline)", Toast.LENGTH_SHORT).show()
+                rewriteChatLogPhotoEntry(chatId, transferId, success = false)
+            }
+            cleanupPhotoTransfer()
+        }
+        timeoutHandler.postDelayed(timeoutTask, PHOTO_ANSWER_TIMEOUT_MS)
         val listener = firestore.collection("transfers").document(transferId)
             .addSnapshotListener { snap, error ->
                 if (error != null) {
@@ -4953,6 +4973,7 @@ class MainActivity : AppCompatActivity() {
                 val state = snap?.getString("state") ?: return@addSnapshotListener
                 when (state) {
                     "rejected" -> {
+                        timeoutHandler.removeCallbacks(timeoutTask)
                         runOnUiThread {
                             Toast.makeText(this, "Recipient declined the photo", Toast.LENGTH_SHORT).show()
                             rewriteChatLogPhotoEntry(chatId, transferId, success = false)
@@ -4961,6 +4982,7 @@ class MainActivity : AppCompatActivity() {
                         return@addSnapshotListener
                     }
                     "rejected_busy" -> {
+                        timeoutHandler.removeCallbacks(timeoutTask)
                         runOnUiThread {
                             Toast.makeText(this, "Recipient is busy with another transfer", Toast.LENGTH_SHORT).show()
                             rewriteChatLogPhotoEntry(chatId, transferId, success = false)
@@ -4969,6 +4991,7 @@ class MainActivity : AppCompatActivity() {
                         return@addSnapshotListener
                     }
                     "expired", "failed" -> {
+                        timeoutHandler.removeCallbacks(timeoutTask)
                         runOnUiThread {
                             Toast.makeText(this, "Photo transfer was aborted", Toast.LENGTH_SHORT).show()
                             rewriteChatLogPhotoEntry(chatId, transferId, success = false)
@@ -4976,7 +4999,7 @@ class MainActivity : AppCompatActivity() {
                         cleanupPhotoTransfer()
                         return@addSnapshotListener
                     }
-                    "accepted" -> { /* fall through */ }
+                    "accepted" -> { timeoutHandler.removeCallbacks(timeoutTask) }
                     else -> return@addSnapshotListener
                 }
                 val answer = snap.getString("answer") ?: return@addSnapshotListener
@@ -6266,6 +6289,10 @@ class MainActivity : AppCompatActivity() {
         // ── Photo transfer hardening (v1.14.16) ──────────────────────────
         /** Stale-offer cutoff: ignore pending transfers older than this when listening. */
         private const val PHOTO_OFFER_TTL_MS = 10 * 60_000L
+        // Sender's wait for the receiver to move /transfers/{tid}.state out of
+        // 'pending'. After this, the sender gives up so its photoTransferPc
+        // doesn't deadlock subsequent incoming offers as busy.
+        private const val PHOTO_ANSWER_TIMEOUT_MS = 60_000L
         /** Receive-side inactivity timeout. Resets on every PHO_CHUNK. */
         private const val PHOTO_RECEIVE_TIMEOUT_MS = 90_000L
         private const val KEY_APP_PIN_SALT = "app_pin_salt"
