@@ -1428,6 +1428,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun chatLogKey(id: String): String = "$KEY_CHAT_LOG_PREFIX$id"
 
+    private fun shouldAutoAcceptPhotoFrom(senderId: String): Boolean =
+        prefs.contains(contactNameKey(senderId)) ||
+            prefs.contains(chatLogKey(senderId)) ||
+            remoteId == senderId
+
     /**
      * Timestamp of the most recent message in the chat log for [id], or 0
      * if the chat is empty / has no entries with timestamps. Used to sort
@@ -5148,11 +5153,11 @@ class MainActivity : AppCompatActivity() {
                         val offer = doc.getString("offer") ?: return@forEach
                         val transferId = doc.getString("transferId") ?: doc.id
                         val senderId = doc.getString("senderId") ?: return@forEach
-                        // Skip stale offers (e.g. from a previous app session that crashed
-                        // mid-transfer): a fresh offer is created within a few seconds; an
-                        // offer older than appSessionStart - PHOTO_OFFER_GRACE_MS is junk.
+                        // Skip stale offers by absolute age. A valid offer can be created
+                        // before the receiver opens the app, so app start time is not safe here.
                         val createdAt = doc.getLong("createdAt") ?: 0L
-                        if (createdAt < appSessionStartMs - PHOTO_OFFER_GRACE_MS) {
+                        val ageMs = System.currentTimeMillis() - createdAt
+                        if (createdAt <= 0L || ageMs > PHOTO_OFFER_TTL_MS) {
                             Log.d(TAG, "Skipping stale photo offer tid=$transferId createdAt=$createdAt")
                             // Best-effort cleanup so it doesn't keep replaying on every start.
                             firestore.collection("transfers").document(doc.id)
@@ -5180,9 +5185,8 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        // Whitelist: known contacts auto-accept; unknown senders prompt for consent.
-        val isKnownContact = prefs.contains(contactNameKey(senderId))
-        if (!isKnownContact) {
+        // Whitelist: saved contacts and existing chats auto-accept; unknown senders prompt for consent.
+        if (!shouldAutoAcceptPhotoFrom(senderId)) {
             runOnUiThread {
                 AlertDialog.Builder(this)
                     .setTitle("Photo from unknown sender")
@@ -6261,7 +6265,7 @@ class MainActivity : AppCompatActivity() {
         private const val V2_PBKDF2_ITERS = 600_000
         // ── Photo transfer hardening (v1.14.16) ──────────────────────────
         /** Stale-offer cutoff: ignore pending transfers older than this when listening. */
-        private const val PHOTO_OFFER_GRACE_MS = 60_000L
+        private const val PHOTO_OFFER_TTL_MS = 10 * 60_000L
         /** Receive-side inactivity timeout. Resets on every PHO_CHUNK. */
         private const val PHOTO_RECEIVE_TIMEOUT_MS = 90_000L
         private const val KEY_APP_PIN_SALT = "app_pin_salt"

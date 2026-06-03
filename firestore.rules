@@ -253,7 +253,15 @@ service cloud.firestore {
           'createdAt',
           'answer'
         ]) &&
-        request.resource.data.state in ['pending', 'accepted', 'done'] &&
+        request.resource.data.state in [
+          'pending',
+          'accepted',
+          'done',
+          'failed',
+          'expired',
+          'rejected',
+          'rejected_busy'
+        ] &&
         isOptionalString('answer', 327680) &&
         (!hasLocalIdClaim() ||
           localIdClaim() == resource.data.senderId ||
