@@ -1,90 +1,111 @@
 # X-link
 
-Encrypted P2P voice + messaging Android app. Photo+password-derived account identity, WebRTC voice/text DataChannels, Firebase signaling for offline message queue + call setup.
+P2P encrypted voice + messaging for Android. Calls travel over WebRTC; messages travel over Firestore with E2E ECIES so the server only sees ciphertext. Identity is derived from a private photo + password — no email, no phone number, no username.
 
-## Quick start
+**Current build:** `v1.15.9-beta` · minSdk 23 · targetSdk 34
 
-1. Clone, open in Android Studio (Hedgehog or newer, AGP 8.3+).
-2. Drop your own `app/google-services.json` (Firebase project config).
-3. Add to `local.properties`:
-   ```
-   turn.username=<your TURN user>
-   turn.password=<your TURN secret>
-   ```
-4. Build → install on Android 6.0+ (`minSdk = 23`).
+---
 
-## Repo layout
+## What it does
+
+- **Voice calls.** WebRTC PeerConnection with TURN relay fallback. Audio is compressed with Codec2 (3200 / 2400 / 1400 bps profiles, JNI bridge) over an SCTP DataChannel.
+- **1:1 messages.** ECIES envelope: ephemeral EC P-256 → ECDH → AES-256-GCM. Server stores opaque blobs only.
+- **Group chats.** Per-message fan-out; admin actions; auto-discovery via shared key material.
+- **Reply-to.** Long-press a message, reply with a quoted preview.
+- **Photo transfer.** Out-of-band peer-to-peer with optional account-password binding (hash never leaves the device).
+- **Search.** Inline pill-style search across chats and contacts.
+- **Auto-update.** App polls GitHub Releases on launch, prompts to install the highest-semver APK.
+- **Beta logger.** Local-only logcat capture at `filesDir/beta_logs/log.txt` (2 MB rotating) for diagnostics.
+
+---
+
+## Security model
+
+| Layer | Mechanism |
+|------|-----------|
+| Identity | EC P-256 keypair derived from `PBKDF2-HMAC-SHA256(photo ‖ password, salt=localId, 600 000 iter)` |
+| Server bind | Firebase Auth anonymous UID → callable `bindLocalId` proves ownership with ECDSA over `localId‖uid‖ts` (60 s window, replay-protected) |
+| Device cap | LRU-evicted at 3 devices per `localId`; evicted UID loses its custom claim |
+| Messages | ECIES (ephemeral EC + AES-256-GCM); ciphertext-only on Firestore |
+| Keys at rest | `EncryptedSharedPreferences` wrapped by Android Keystore master key |
+| PIN / biometric | Constant-time compare; BiometricPrompt gate on cold start |
+| Backup | KDF v3 — same PBKDF2 profile as identity, never reused |
+| Push | FCM data-only messages; payload contains no sender content |
+
+**Known gaps** are tracked in `memory/security_findings.md` — a 13-item audit ranked CRITICAL → MEDIUM.
+
+---
+
+## Stack
+
+- **Android:** Kotlin, ViewBinding, ConstraintLayout, Material 3 components, custom drawer-style dark theme
+- **Voice:** `io.github.webrtc-sdk:android` + Codec2 via CMake/NDK (`arm64-v8a`, `armeabi-v7a`)
+- **Crypto:** JCE (`KeyAgreement`, `Cipher/GCM`, `MessageDigest`) + `androidx.security:security-crypto`
+- **Backend:** Firebase Auth, Firestore, Cloud Functions (Node 20), FCM
+- **QR:** ZXing core + `journeyapps:zxing-android-embedded`
+- **Build:** Gradle KTS, AGP 8.x, JDK 17, Kotlin 1.9.23
+
+---
+
+## Layout
 
 ```
-.
-├── app/
-│   ├── src/main/java/com/example/
-│   │   ├── xxxlinkxxxclaude/        MainActivity (UI + Firestore + WebRTC orchestration)
-│   │   └── p2pcodec2/               BackupWorker, BetaLogger, CallForegroundService,
-│   │                                Codec2Bridge, XxxFirebaseMessagingService
-│   ├── src/main/cpp/                Codec2 JNI bridge (CMake)
-│   └── src/main/res/                Layouts, drawables, values
-├── functions/                       Firebase Cloud Functions (FCM + bindLocalId)
-├── firestore.rules                  Firestore security rules
-├── firebase.json                    Firebase deploy config
-├── build.gradle.kts                 Project-level Gradle
-└── README.md
+app/                                 Android module
+├── src/main/java/
+│   ├── com/example/p2pcodec2/         FCM, foreground service, Codec2 bridge
+│   └── com/example/xxxlinkxxxclaude/  MainActivity + UI flows
+├── src/main/cpp/                      codec2 native + JNI shim
+└── src/main/res/                      layouts, drawables, raw sounds
+functions/                          Cloud Functions (bindLocalId, FCM dispatch)
+firestore.rules                     Per-collection access with grace-period auth fallback
+memory/                             Project notes consumed by Claude agents
+.agents/                            Multi-agent coordination framework + registry
 ```
 
-## Architecture
+---
 
-- **Auth.** v2 derivation: `PBKDF2(password, salt=photoBytes, 600k iterations) → master`.
-  `localId = first 4 bytes of SHA256("localid-v2:" || master)`. EC keypair from
-  `SHA256("crypto-v2:" || master)`. Neither photo nor password leaves the device.
-  Firebase Auth (anonymous) issues a `uid` per install; the `bindLocalId` Cloud
-  Function maps `uid ↔ localId` after ECDSA signature verification, up to 3 devices
-  per account with LRU eviction.
+## Build
 
-- **Messages.** ECIES (ephemeral EC + AES-256-GCM). Live path: WebRTC DataChannel.
-  Offline path: Firestore `/messages`. Delivery + read receipts in `/receipts`.
-
-- **Calls.** WebRTC PeerConnection with Firestore signaling (`/calls/{id}` +
-  `/calls/{id}/candidates`). Voice via Opus (COMFY mode) or Codec2 (BASE / Xtream).
-  Foreground service + partial wake lock keep the call alive when backgrounded.
-
-- **Photos.** Separate WebRTC PeerConnection per transfer (`/transfers/{tid}`).
-  AES-GCM encrypted whole, chunked over a DataChannel. Watchdog timeouts,
-  busy-reject signalling, whitelist consent for unknown senders.
-
-- **Updates.** GitHub Releases as the distribution channel. App polls `/releases`
-  and offers in-app install of the newest semver prerelease.
-
-## Firestore rules
-
-`firestore.rules` carries a v2 schema with a grace-period fallback: clients that
-have a `localId` custom claim (set by `bindLocalId`) are subject to strict
-participant checks; clients without the claim still pass the v1 format-only
-checks so v1.14.x → v1.15 migration doesn't break older installs.
-
-Deploy:
 ```bash
-firebase deploy --only firestore:rules
-firebase deploy --only functions:bindLocalId
+# Debug install
+./gradlew assembleDebug installDebug
+
+# Release APK (signed with the project's debug key)
+./gradlew assembleRelease
+# → app/build/outputs/apk/release/app-release.apk
 ```
 
-## Branches & releases
+Drop `app/google-services.json` from your Firebase project. Add TURN credentials to `local.properties`:
 
-- `main`: active development. Every push lands a `v1.x.y-beta` GitHub prerelease
-  with the APK attached.
-- `develop`: mirror of `main`. Kept in sync via force-push so either name shows
-  the latest code.
-- Older `feature/*` branches were merged or abandoned long ago; they remain on the
-  remote for history only.
+```properties
+turn.username=…
+turn.password=…
+```
 
-Release notes live in the corresponding [GitHub Release](https://github.com/nykleforse/xxxlinxxx/releases),
-not in checked-in `.txt` files.
+These are baked into `BuildConfig` — replace with backend-issued short-lived creds before any production release.
 
-## Beta diagnostics
+---
 
-Beta builds capture `logcat` to `filesDir/beta_logs/log.txt` (2 MB rotating, 1
-prior copy). Drawer → **Share beta log** exports via the Android share sheet for
-bug reports. Production builds skip the capture entirely.
+## Functions deploy
 
-## License
+```bash
+cd functions
+npm install
+firebase deploy --only functions
+firebase deploy --only firestore:rules
+```
 
-Proprietary. Not for redistribution.
+---
+
+## Versioning + releases
+
+- `main` — stable line + beta cuts
+- `develop` — kept in sync with `main`
+- Tags: `vMAJOR.MINOR.PATCH[-beta]`
+- Every tag has a corresponding GitHub Release with a single `xxxlink-<ver>.apk` asset; the in-app updater picks the highest semver
+
+---
+
+## Status
+
+Pre-1.0 beta. Schema, wire format, and KDF parameters may still change between minor versions; expect re-binding to be required after major-version upgrades.
