@@ -22,10 +22,10 @@ android {
 
     defaultConfig {
         applicationId = "com.example.xxxlinkxxx"
-        minSdk = 21
+        minSdk = 23
         targetSdk = 34
-        versionCode = 153
-        versionName = "1.14.13-beta"
+        versionCode = 154
+        versionName = "1.14.14-beta"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
@@ -98,10 +98,12 @@ dependencies {
     // ===== WebRTC =====
     implementation("io.github.webrtc-sdk:android:144.7559.01")
 
-    // ===== Firebase Firestore =====
+    // ===== Firebase Firestore + Auth + Functions =====
     implementation(platform("com.google.firebase:firebase-bom:33.2.0"))
     implementation("com.google.firebase:firebase-firestore-ktx")
     implementation("com.google.firebase:firebase-messaging-ktx")
+    implementation("com.google.firebase:firebase-auth-ktx")
+    implementation("com.google.firebase:firebase-functions-ktx")
 
     // ===== Kotlin stdlib =====
     implementation("org.jetbrains.kotlin:kotlin-stdlib:1.9.23")

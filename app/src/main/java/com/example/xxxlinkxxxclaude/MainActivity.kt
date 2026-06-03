@@ -108,6 +108,7 @@ class MainActivity : AppCompatActivity() {
 
     private var localId = ""
     private var remoteId = ""
+    @Volatile private var authUid: String? = null
     @Volatile private var currentCallId: String? = null
     private var pendingIncomingCall: IncomingCall? = null
 
@@ -269,13 +270,33 @@ class MainActivity : AppCompatActivity() {
         binding.btnChooseAuthPhoto.setOnClickListener {
             photoAuthPicker.launch("image/*")
         }
+        binding.btnLoginWithPassword.setOnClickListener { loginWithPhotoAndPassword() }
+        binding.authPasswordInput.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) { updateLoginButtonEnabled() }
+        })
 
         val savedId = prefs.getString(KEY_LOCAL_ID, null)
-        val savedSecret = prefs.getString(KEY_PHOTO_ACCOUNT_SECRET, null)
-        if (!savedId.isNullOrBlank() && !savedSecret.isNullOrBlank()) {
-            continueWithLocalIdentity(savedId)
-        } else {
-            showPhotoAuthScreen()
+        val savedV1Secret = prefs.getString(KEY_PHOTO_ACCOUNT_SECRET, null)
+        val savedV2Secret = prefs.getString(KEY_V2_CRYPTO_SECRET, null)
+        val authVersion = prefs.getInt(KEY_AUTH_VERSION, 1)
+
+        when {
+            // Already on v2 — go straight in.
+            !savedId.isNullOrBlank() && authVersion >= 2 && !savedV2Secret.isNullOrBlank() -> {
+                continueWithLocalIdentity(savedId)
+            }
+            // v1 user — force migration via the password screen.
+            !savedId.isNullOrBlank() && !savedV1Secret.isNullOrBlank() -> {
+                migratingV1 = true
+                showPhotoAuthScreen()
+            }
+            // Brand-new install.
+            else -> {
+                migratingV1 = false
+                showPhotoAuthScreen()
+            }
         }
     }
 
@@ -287,15 +308,27 @@ class MainActivity : AppCompatActivity() {
         binding.photoAuthScreen.visibility = View.GONE
         binding.contactListScreen.visibility = View.VISIBLE
 
-        // Derive EC keypair off main thread; startCore only after keypair is ready
-        val secretB64 = prefs.getString(KEY_PHOTO_ACCOUNT_SECRET, null)
-        if (secretB64 == null) {
+        val authVersion = prefs.getInt(KEY_AUTH_VERSION, 1)
+        val v2SecretB64 = prefs.getString(KEY_V2_CRYPTO_SECRET, null)
+        val v1SecretB64 = prefs.getString(KEY_PHOTO_ACCOUNT_SECRET, null)
+
+        // Derive EC keypair off main thread; startCore only after keypair is ready.
+        // v2 path: PBKDF2-derived crypto_secret seeds the keypair.
+        // v1 path: legacy SHA256(salt+photo) secret seeds the keypair (kept for
+        // backward compat until user goes through the migration screen).
+        if (authVersion >= 2 && v2SecretB64 != null) {
+            ioScope.launch {
+                myEcKeyPair = deriveEcKeyPair(b64decode(v2SecretB64))
+                withContext(Dispatchers.Main) { startCore() }
+            }
+        } else if (v1SecretB64 != null) {
+            ioScope.launch {
+                myEcKeyPair = deriveEcKeyPair(b64decode(v1SecretB64))
+                withContext(Dispatchers.Main) { startCore() }
+            }
+        } else {
             showPhotoAuthScreen()
             return
-        }
-        ioScope.launch {
-            myEcKeyPair = deriveEcKeyPair(b64decode(secretB64))
-            withContext(Dispatchers.Main) { startCore() }
         }
     }
 
@@ -307,8 +340,17 @@ class MainActivity : AppCompatActivity() {
         binding.incomingCallScreen.visibility = View.GONE
         binding.outgoingCallScreen.visibility = View.GONE
         binding.activeCallScreen.visibility = View.GONE
-        binding.photoAuthStatus.text = "Select your account photo"
-        binding.btnChooseAuthPhoto.isEnabled = db != null
+        if (migratingV1) {
+            binding.photoAuthStatus.text = "Set an account password to continue\n(your existing account stays the same)"
+            binding.btnChooseAuthPhoto.visibility = View.GONE
+            binding.authPhotoChosen.visibility = View.GONE
+        } else {
+            binding.photoAuthStatus.text = "Select photo, then enter password"
+            binding.btnChooseAuthPhoto.visibility = View.VISIBLE
+            binding.btnChooseAuthPhoto.isEnabled = db != null
+            binding.authPhotoChosen.visibility = View.GONE
+        }
+        updateLoginButtonEnabled()
     }
 
     private fun doLogout() {
@@ -370,11 +412,91 @@ class MainActivity : AppCompatActivity() {
                 .setPersistenceEnabled(false)
                 .build()
         }
+        signInAnonymouslyIfNeeded()
+    }
+
+    /**
+     * Ensure the client has a Firebase Auth uid. Anonymous sign-in must be enabled
+     * in Firebase Console → Authentication → Sign-in method. The uid persists in
+     * Firebase Auth state across app launches; we only call signIn when there's
+     * no current user. After sign-in, [authUid] is set and subsequent Firestore
+     * writes carry the auth context (used by the v2 security rules).
+     */
+    private fun signInAnonymouslyIfNeeded() {
+        val auth = com.google.firebase.auth.FirebaseAuth.getInstance()
+        val existing = auth.currentUser
+        if (existing != null) {
+            authUid = existing.uid
+            Log.d(TAG, "Firebase Auth: existing uid=$authUid")
+            onAuthReady()
+            return
+        }
+        auth.signInAnonymously()
+            .addOnSuccessListener { result ->
+                authUid = result.user?.uid
+                Log.d(TAG, "Firebase Auth: signed in anonymously uid=$authUid")
+                onAuthReady()
+            }
+            .addOnFailureListener { e ->
+                // Most likely Anonymous sign-in is disabled in Firebase Console.
+                // Old rules still allow unauthenticated writes during the grace
+                // window, so we keep working — security upgrade just stalls.
+                Log.w(TAG, "Firebase Auth signIn failed: ${e.message}")
+            }
+    }
+
+    /** Called once auth is established. Triggers bindLocalId if we have an identity. */
+    private fun onAuthReady() {
+        // Defer until both authUid and EC keypair + localId are ready.
+        if (authUid == null || localId.isBlank() || myEcKeyPair == null) return
+        bindLocalIdOnce()
+    }
+
+    @Volatile private var bindingInFlight = false
+    @Volatile private var localIdBound = false
+
+    private fun bindLocalIdOnce() {
+        if (bindingInFlight || localIdBound) return
+        val uid = authUid ?: return
+        val kp = myEcKeyPair ?: return
+        val id = localId.takeIf { it.isNotBlank() } ?: return
+        bindingInFlight = true
+        ioScope.launch {
+            runCatching {
+                val pubkey = b64(kp.public.encoded)
+                val message = "$id\n$uid".toByteArray(Charsets.UTF_8)
+                val sig = java.security.Signature.getInstance("SHA256withECDSA").apply {
+                    initSign(kp.private)
+                    update(message)
+                }
+                val signature = b64(sig.sign())
+                val functions = com.google.firebase.functions.FirebaseFunctions.getInstance()
+                val data = hashMapOf(
+                    "localId" to id,
+                    "pubkey" to pubkey,
+                    "signature" to signature
+                )
+                val result = functions.getHttpsCallable("bindLocalId")
+                    .call(data).await()
+                Log.d(TAG, "bindLocalId ok: ${result.data}")
+                // Refresh ID token so the new custom claim {localId} is picked up
+                // by subsequent Firestore requests.
+                com.google.firebase.auth.FirebaseAuth.getInstance().currentUser
+                    ?.getIdToken(true)?.await()
+                localIdBound = true
+            }.onFailure { e ->
+                Log.w(TAG, "bindLocalId failed: ${e.message}")
+            }
+            bindingInFlight = false
+        }
     }
 
     private fun startCore() {
         if (coreStarted) return
         coreStarted = true
+        // Bind localId to current Firebase Auth uid (idempotent for same uid,
+        // also re-binds to a new uid when the user logs in on a fresh install).
+        onAuthReady()
         initAudio()
         initPeerFactory()
         resetPeerConnection(createLocalChannels = false)
@@ -872,24 +994,107 @@ class MainActivity : AppCompatActivity() {
         binding.status.text = "ID copied"
     }
 
+    /**
+     * NEW USER FLOW: photo picked from device, password typed.
+     * Both required. Cached in memory until [btnLoginWithPassword] is tapped.
+     * For an existing v1 user, [chosenPhotoBytes] stays null because we already
+     * have v1 secret in prefs — migration only needs the password.
+     */
+    @Volatile private var chosenPhotoBytes: ByteArray? = null
+    /** True iff prefs hold v1 secret but no v2 — user must migrate by adding a password. */
+    private var migratingV1: Boolean = false
+
     private fun authenticateWithPhoto(uri: Uri) {
         binding.btnChooseAuthPhoto.isEnabled = false
         binding.photoAuthStatus.text = "Reading photo"
         ioScope.launch {
-            val authMaterial = runCatching { photoAuthMaterial(uri) }.getOrElse { _ ->
+            val bytes = runCatching {
+                contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: error("empty photo")
+            }.getOrElse { _ ->
                 withContext(Dispatchers.Main) {
                     binding.photoAuthStatus.text = "Photo read failed"
                     binding.btnChooseAuthPhoto.isEnabled = true
                 }
                 return@launch
             }
-            // localId and keypair derived entirely on-device — server stores nothing about the photo
-            val id = deriveLocalId(authMaterial.secret)
-            savePhotoAccount(id, authMaterial.secret)
+            chosenPhotoBytes = bytes
             withContext(Dispatchers.Main) {
-                continueWithLocalIdentity(id)
+                binding.photoAuthStatus.text = "Now enter your password"
+                binding.authPhotoChosen.text = "✓ Photo loaded (${bytes.size / 1024} KB)"
+                binding.authPhotoChosen.visibility = View.VISIBLE
+                binding.btnChooseAuthPhoto.isEnabled = true
+                updateLoginButtonEnabled()
             }
         }
+    }
+
+    private fun updateLoginButtonEnabled() {
+        val passwordOk = binding.authPasswordInput.text?.toString()?.isNotEmpty() == true
+        val photoOk = chosenPhotoBytes != null || migratingV1
+        binding.btnLoginWithPassword.isEnabled = passwordOk && photoOk
+    }
+
+    /**
+     * Final step after photo + password are both provided. Derives v2 master
+     * via PBKDF2 (password as key, photo bytes as salt) — never sends the
+     * password or photo to the server. Saves v2 secret to prefs and continues.
+     */
+    private fun loginWithPhotoAndPassword() {
+        val password = binding.authPasswordInput.text?.toString().orEmpty()
+        if (password.isEmpty()) return
+        binding.btnLoginWithPassword.isEnabled = false
+        binding.photoAuthStatus.text = "Deriving keys (this takes a moment)..."
+
+        ioScope.launch {
+            val (localIdNew, cryptoSecret) = if (migratingV1) {
+                // Migration: salt = existing v1 secret. localId stays unchanged.
+                val v1SecretB64 = prefs.getString(KEY_PHOTO_ACCOUNT_SECRET, null)
+                    ?: return@launch failLogin("Missing legacy secret")
+                val v1Secret = b64decode(v1SecretB64)
+                val master = pbkdf2(password.toByteArray(Charsets.UTF_8), v1Secret, V2_PBKDF2_ITERS, 32)
+                val crypto = sha256("crypto-v2:".toByteArray(Charsets.UTF_8) + master)
+                // Keep existing localId; only crypto material changes.
+                val existingId = prefs.getString(KEY_LOCAL_ID, null) ?: return@launch failLogin("Missing local id")
+                existingId to crypto
+            } else {
+                val photoBytes = chosenPhotoBytes ?: return@launch failLogin("Pick a photo first")
+                val master = pbkdf2(password.toByteArray(Charsets.UTF_8), photoBytes, V2_PBKDF2_ITERS, 32)
+                val localBytes = sha256("localid-v2:".toByteArray(Charsets.UTF_8) + master)
+                val id = localBytes.take(4).joinToString("") { "%02X".format(it) }
+                val crypto = sha256("crypto-v2:".toByteArray(Charsets.UTF_8) + master)
+                id to crypto
+            }
+            // Save v2 secret. Keep v1 secret if it existed (for decrypting legacy
+            // cloud messages encrypted with the v1 key while migration in flight).
+            prefs.edit()
+                .putString(KEY_LOCAL_ID, localIdNew)
+                .putString(KEY_V2_CRYPTO_SECRET, b64(cryptoSecret))
+                .putInt(KEY_AUTH_VERSION, 2)
+                .apply()
+            // Wipe in-memory password and photo bytes ASAP.
+            chosenPhotoBytes = null
+            withContext(Dispatchers.Main) {
+                binding.authPasswordInput.text?.clear()
+                continueWithLocalIdentity(localIdNew)
+            }
+        }
+    }
+
+    private suspend fun failLogin(msg: String) {
+        withContext(Dispatchers.Main) {
+            binding.photoAuthStatus.text = msg
+            binding.btnLoginWithPassword.isEnabled = true
+        }
+    }
+
+    /** PBKDF2-HMAC-SHA256. password = key material, salt = personalization. */
+    private fun pbkdf2(password: ByteArray, salt: ByteArray, iters: Int, length: Int): ByteArray {
+        val spec = javax.crypto.spec.PBEKeySpec(
+            password.map { it.toInt().toChar() }.toCharArray(),
+            salt, iters, length * 8
+        )
+        val factory = javax.crypto.SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+        return factory.generateSecret(spec).encoded
     }
 
     private fun savePhotoAccount(id: String, secret: ByteArray) {
@@ -4885,6 +5090,10 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_APP_IN_FOREGROUND = "app_in_foreground"
         private const val KEY_APP_LOCK_ENABLED = "app_lock_enabled"
         private const val KEY_APP_PIN_HASH = "app_pin_hash"
+        // ── v2 auth (photo + password) ─────────────────────────────────
+        private const val KEY_AUTH_VERSION = "auth_version"
+        private const val KEY_V2_CRYPTO_SECRET = "v2_crypto_secret"
+        private const val V2_PBKDF2_ITERS = 600_000
         private const val KEY_APP_PIN_SALT = "app_pin_salt"
         private const val KEY_PIN_FAILURES = "app_pin_failures"
         private const val KEY_PIN_LOCKOUT_UNTIL = "app_pin_lockout_until"

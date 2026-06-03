@@ -36,7 +36,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="10dp"
-                android:text="Select your account photo"
+                android:text="Select photo, then enter password"
                 android:textColor="@color/text_secondary"
                 android:textSize="14sp" />
 
@@ -48,6 +48,47 @@
                 android:backgroundTint="@color/control"
                 android:text="Choose photo"
                 android:textColor="@color/text_primary" />
+
+            <TextView
+                android:id="@+id/authPhotoChosen"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:textColor="@color/text_muted"
+                android:textSize="12sp"
+                android:visibility="gone"
+                tools:text="✓ Photo loaded" />
+
+            <EditText
+                android:id="@+id/authPasswordInput"
+                android:layout_width="match_parent"
+                android:layout_height="52dp"
+                android:layout_marginTop="16dp"
+                android:backgroundTint="@color/line"
+                android:hint="Password"
+                android:inputType="textPassword"
+                android:textColor="@color/text_primary"
+                android:textColorHint="@color/text_muted"
+                android:textSize="16sp" />
+
+            <Button
+                android:id="@+id/btnLoginWithPassword"
+                android:layout_width="match_parent"
+                android:layout_height="52dp"
+                android:layout_marginTop="16dp"
+                android:backgroundTint="@color/control"
+                android:enabled="false"
+                android:text="Log in"
+                android:textColor="@color/text_primary" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="24dp"
+                android:gravity="center"
+                android:text="Your photo + password derive the account locally.\nNeither leaves the device."
+                android:textColor="@color/text_muted"
+                android:textSize="11sp" />
         </LinearLayout>
 
         <!-- CONTACT LIST -->
