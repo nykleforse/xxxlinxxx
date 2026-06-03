@@ -873,14 +873,14 @@
                 <LinearLayout
                     android:id="@+id/btnExportBackup"
                     style="@style/DrawerItem">
-                    <TextView style="@style/DrawerItemIcon" android:text="&#8593;" />
+                    <TextView style="@style/DrawerItemIcon" android:text="&#8595;" />
                     <TextView style="@style/DrawerItemText" android:text="Backup" />
                 </LinearLayout>
 
                 <LinearLayout
                     android:id="@+id/btnImportBackup"
                     style="@style/DrawerItem">
-                    <TextView style="@style/DrawerItemIcon" android:text="&#8595;" />
+                    <TextView style="@style/DrawerItemIcon" android:text="&#8593;" />
                     <TextView style="@style/DrawerItemText" android:text="Restore" />
                 </LinearLayout>
 
