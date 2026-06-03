@@ -59,6 +59,27 @@ compose.desktop {
             description = "xxxlinkxxx desktop client"
             vendor = "nykleforse"
 
+            // jpackage runs jlink to strip JDK modules that the app does
+            // not explicitly reference. The Compose Desktop plugin does
+            // not know about our Firestore REST + Cloud Functions HTTP
+            // code (java.net.http) or our ECIES key derivation (jdk
+            // .crypto.ec), so they get stripped and the installer's
+            // runtime image throws ClassNotFoundException on login.
+            // Declare them up front:
+            //   java.net.http   — FirebaseClient HttpClient
+            //   jdk.crypto.ec   — Crypto.deriveEcKeyPair / ECDH (EC P-256)
+            //   java.naming     — Firebase DNS resolution paths
+            //   jdk.unsupported — sun.misc.Unsafe used by some Kotlin
+            //                     coroutines internals
+            //   java.sql        — pulled in by Firestore protobuf
+            modules(
+                "java.net.http",
+                "jdk.crypto.ec",
+                "java.naming",
+                "jdk.unsupported",
+                "java.sql",
+            )
+
             // Per-OS app resource roots. The codec2_bridge.dll under
             // resources/windows-x64/ gets copied into the installer next to
             // the launcher.exe, picked up at runtime via the system
