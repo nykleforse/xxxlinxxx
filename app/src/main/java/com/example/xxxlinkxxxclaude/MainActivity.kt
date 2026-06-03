@@ -1855,6 +1855,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        // Clean up dead v3 channels (cached broken sound URIs after the raw
+        // resource rename incomming_* → incoming_* in v1.14.18).
+        runCatching {
+            notificationManager().deleteNotificationChannel(LEGACY_CALLS_CHANNEL_ID)
+            notificationManager().deleteNotificationChannel(LEGACY_MESSAGES_CHANNEL_ID)
+        }
         val callSound = notificationSound(R.raw.incoming_call)
         val messageSound = notificationSound(R.raw.incoming_message)
         val callAudioAttributes = AudioAttributes.Builder()
@@ -6177,8 +6183,14 @@ class MainActivity : AppCompatActivity() {
         private const val GITHUB_REPO  = "xxxlinxxx"
         private const val GITHUB_API   =
             "https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/releases/latest"
-        private const val NOTIFICATION_CALLS_CHANNEL_ID = "xxxlink_calls_v3"
-        private const val NOTIFICATION_MESSAGES_CHANNEL_ID = "xxxlink_messages_v3"
+        // v4: bumped from v3 because sound URIs changed when the raw resources
+        // were renamed (incomming_* → incoming_*). Android caches the sound at
+        // channel-creation time on API 26+; the only way to apply the new URI
+        // is to register a fresh channel ID.
+        private const val NOTIFICATION_CALLS_CHANNEL_ID = "xxxlink_calls_v4"
+        private const val NOTIFICATION_MESSAGES_CHANNEL_ID = "xxxlink_messages_v4"
+        private const val LEGACY_CALLS_CHANNEL_ID = "xxxlink_calls_v3"
+        private const val LEGACY_MESSAGES_CHANNEL_ID = "xxxlink_messages_v3"
         private const val NOTIFICATION_CALL_ID = 5001
         private const val NOTIFICATION_MESSAGE_ID_BASE = 6000
         private const val PHOTO_CHANNEL_MAX_BUFFERED_AMOUNT_BYTES = 256L * 1024L

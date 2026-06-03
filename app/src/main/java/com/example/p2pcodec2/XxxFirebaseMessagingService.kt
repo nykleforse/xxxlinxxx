@@ -131,6 +131,11 @@ class XxxFirebaseMessagingService : FirebaseMessagingService() {
 
     private fun createNotificationChannels() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        // Clean up dead v3 channels (cached broken sound URIs).
+        runCatching {
+            notificationManager().deleteNotificationChannel(LEGACY_CALLS_CHANNEL_ID)
+            notificationManager().deleteNotificationChannel(LEGACY_MESSAGES_CHANNEL_ID)
+        }
         val callSound = notificationSound(R.raw.incoming_call)
         val messageSound = notificationSound(R.raw.incoming_message)
         val callAudioAttributes = AudioAttributes.Builder()
@@ -205,8 +210,12 @@ class XxxFirebaseMessagingService : FirebaseMessagingService() {
         private const val KEY_CONTACT_PREFIX = "contact_name_"
         private const val KEY_FCM_TOKEN = "fcm_token"
         private const val KEY_UNREAD_NOTIFICATION_COUNT = "unread_notification_count"
-        private const val NOTIFICATION_CALLS_CHANNEL_ID = "xxxlink_calls_v3"
-        private const val NOTIFICATION_MESSAGES_CHANNEL_ID = "xxxlink_messages_v3"
+        // v4: see MainActivity for rationale (raw resource rename invalidated
+        // the cached sound URI on v3 channels).
+        private const val NOTIFICATION_CALLS_CHANNEL_ID = "xxxlink_calls_v4"
+        private const val NOTIFICATION_MESSAGES_CHANNEL_ID = "xxxlink_messages_v4"
+        private const val LEGACY_CALLS_CHANNEL_ID = "xxxlink_calls_v3"
+        private const val LEGACY_MESSAGES_CHANNEL_ID = "xxxlink_messages_v3"
         private const val NOTIFICATION_CALL_ID = 5001
         private const val NOTIFICATION_MESSAGE_ID_BASE = 6000
         private const val NOTIFICATION_FALLBACK_ID = 7001
