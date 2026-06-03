@@ -4332,14 +4332,16 @@ class MainActivity : AppCompatActivity() {
             }
             val body = conn.inputStream.bufferedReader().use { it.readText() }
             val arr = org.json.JSONArray(body)
-            // GitHub returns releases ordered by created_at, but tag age does not
-            // mean newest version (forks/cherry-picks can create older-dated tags
-            // for higher version numbers). Pick the prerelease with the highest
-            // semantic version, not just the first one returned.
+            // "Check beta" returns whichever release has the highest semantic
+            // version, prerelease or stable. Without including stables, a beta
+            // user installed on 1.14.23-beta would never see the 1.15.x stable
+            // line via the beta button. The "Check for updates" stable button
+            // still uses /releases/latest which excludes prereleases — so the
+            // two buttons remain semantically distinct.
             var best: ReleaseInfo? = null
             for (i in 0 until arr.length()) {
                 val obj = arr.getJSONObject(i)
-                if (!obj.optBoolean("prerelease", false)) continue
+                if (obj.optBoolean("draft", false)) continue
                 val candidate = runCatching { parseRelease(obj) }.getOrNull() ?: continue
                 if (best == null || isNewerVersion(candidate.tagName, best.tagName)) {
                     best = candidate
