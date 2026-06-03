@@ -1,10 +1,20 @@
 #include <jni.h>
-#include <android/log.h>
 #include "codec2.h"
 #include <vector>
 
+// Logging shim. Android NDK exposes __android_log_print + ANDROID_LOG_* via
+// android/log.h; that header is not available on Windows or Linux desktop
+// builds. Fall back to stderr so the JNI symbols still link in the desktop
+// libcodec2_bridge.dll.
+#if defined(__ANDROID__)
+#include <android/log.h>
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "Codec2Bridge", __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "Codec2Bridge", __VA_ARGS__)
+#else
+#include <cstdio>
+#define LOGI(...) do { fprintf(stderr, "Codec2Bridge I: "); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while (0)
+#define LOGE(...) do { fprintf(stderr, "Codec2Bridge E: "); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while (0)
+#endif
 
 extern "C" {
 

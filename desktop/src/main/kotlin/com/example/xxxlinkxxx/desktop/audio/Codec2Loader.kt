@@ -75,7 +75,7 @@ object Codec2Loader {
         }
         val archTag = when {
             arch.contains("aarch64") || arch.contains("arm64") -> "arm64"
-            else -> "x86_64"
+            else -> "x64"
         }
         val libName = when (osTag) {
             "windows" -> "codec2_bridge.dll"
@@ -84,7 +84,12 @@ object Codec2Loader {
         }
         val userHome = System.getProperty("user.home")
         val workDir = System.getProperty("user.dir")
-        return listOf(
+        // Compose Desktop exposes the per-app resources directory through
+        // this property at runtime — it's where appResourcesRootDir contents
+        // land inside the installed app image.
+        val composeRes = System.getProperty("compose.application.resources.dir")
+        return listOfNotNull(
+            composeRes?.let { File(it, libName) },
             File(File(userHome, ".xxxlink"), "native/$osTag-$archTag/$libName"),
             File(File(workDir, "native"), "$osTag-$archTag/$libName"),
             File("native/$osTag-$archTag/$libName"),

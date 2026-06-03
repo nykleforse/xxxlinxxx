@@ -170,19 +170,48 @@ add_library(codec2_bridge SHARED
     codec2_bridge.cpp
 )
 
-target_link_options(codec2_bridge PRIVATE
-    "-Wl,-z,max-page-size=16384"
-)
+# Linker option -Wl,-z,max-page-size=16384 is GNU-ld specific (Android NDK
+# linker accepts it; MinGW-w64 ld does not). Guard so the same CMakeLists
+# can target Android + Windows.
+if(ANDROID)
+    target_link_options(codec2_bridge PRIVATE
+        "-Wl,-z,max-page-size=16384"
+    )
+endif()
+
+# Windows native build: strip the MinGW "lib" prefix so the artefact is
+# codec2_bridge.dll (matches Codec2Loader's search), and statically link
+# libgcc + libstdc++ + winpthread so the DLL has no MinGW runtime side-
+# dependencies for end users.
+if(WIN32 AND NOT ANDROID)
+    set_target_properties(codec2_bridge PROPERTIES PREFIX "")
+    target_link_options(codec2_bridge PRIVATE
+        -static
+        -static-libgcc
+        -static-libstdc++
+        -Wl,--kill-at
+    )
+endif()
 
 target_include_directories(codec2_bridge PRIVATE
     ${CODEC2_DIR}/src
     ${CODEC2_DIR}
 )
 
-find_library(log-lib log)
+# Android NDK pulls jni.h via the toolchain by default; on desktop targets
+# (Windows / Linux / macOS) we need to ask CMake to locate the JDK's JNI
+# headers explicitly. Honors JAVA_HOME env var via the bundled FindJNI.
+if(NOT ANDROID)
+    find_package(JNI REQUIRED)
+    target_include_directories(codec2_bridge PRIVATE ${JNI_INCLUDE_DIRS})
+endif()
 
-target_link_libraries(
-    codec2_bridge
-    codec2_core
-    ${log-lib}
-)
+# Android NDK exposes liblog; on desktop we have no equivalent. find_library
+# returns -NOTFOUND on non-Android targets, which becomes a literal in the
+# link line, so guard it.
+if(ANDROID)
+    find_library(log-lib log)
+    target_link_libraries(codec2_bridge codec2_core ${log-lib})
+else()
+    target_link_libraries(codec2_bridge codec2_core)
+endif()

@@ -59,9 +59,23 @@ compose.desktop {
             description = "xxxlinkxxx desktop client"
             vendor = "nykleforse"
 
+            // Per-OS app resource roots. The codec2_bridge.dll under
+            // resources/windows-x64/ gets copied into the installer next to
+            // the launcher.exe, picked up at runtime via the system
+            // property `compose.application.resources.dir`. Codec2Loader
+            // checks that path first so voice calls work out of the box
+            // without the user installing MinGW.
+            appResourcesRootDir.set(project.layout.projectDirectory.dir("resources"))
+
             windows {
                 menuGroup = "XxxLink"
                 upgradeUuid = "B6D2C3A4-1F5E-4A9D-B8C7-1234567890AB"
+                // Per-user install with no admin prompt — friends-and-family
+                // distribution path. They double-click the .exe, click Next,
+                // it lands in %LOCALAPPDATA%\XxxLinkDesktop\.
+                perUserInstall = true
+                shortcut = true
+                dirChooser = false
             }
         }
     }
