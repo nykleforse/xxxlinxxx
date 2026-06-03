@@ -9,6 +9,8 @@ pluginManagement {
         }
         mavenCentral()
         gradlePluginPortal()
+        // Compose Multiplatform plugin lives on this Space repo; required for :desktop.
+        maven("https://maven.pkg.jetbrains.space/public/p/compose/dev")
     }
 }
 plugins {
@@ -19,9 +21,11 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // Compose Desktop runtime artifacts (currentOs etc.) come from this repo.
+        maven("https://maven.pkg.jetbrains.space/public/p/compose/dev")
     }
 }
 
 rootProject.name = "xxxlinkxxxclaude"
 include(":app")
- 
+include(":desktop")
