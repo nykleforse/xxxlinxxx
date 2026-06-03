@@ -581,6 +581,7 @@ class MainActivity : AppCompatActivity() {
         listenIncomingCalls()
         listenIncomingPhotoTransfers()
         startMessagePolling()
+        resumeAllGroupListeners()
         BackupWorker.schedule(this)
         // Silent background update check — shows dialog only if update found
         ioScope.launch {
@@ -911,6 +912,10 @@ class MainActivity : AppCompatActivity() {
         binding.btnNewGroup.setOnClickListener {
             binding.drawerLayout.closeDrawer(GravityCompat.START)
             showNewGroupDialog()
+        }
+        // Group chat title row → open group info / management.
+        binding.chatTitle.setOnClickListener {
+            if (isGroup(remoteId)) showGroupInfo(remoteId)
         }
 
         binding.btnCall.setOnClickListener {
@@ -2462,6 +2467,10 @@ class MainActivity : AppCompatActivity() {
         // Optional group routing + reply linking.
         val groupId = document.getString("groupId")?.takeIf { it.isNotBlank() }
         val replyTo = document.getString("replyTo")?.takeIf { it.isNotBlank() }
+        // Auto-discover groups: if the message refers to a group we don't know
+        // yet, pull /groups/{rawId} from Firestore and add it locally so the
+        // chat shows up in the list with the right name + member count.
+        if (groupId != null && groupId !in savedGroupIds()) discoverGroup(groupId)
         // The chatId for the local log: group conversations use the groupId so
         // every member's view of the same group is keyed identically; 1:1
         // conversations key on the sender's localId as before. The original
@@ -3136,6 +3145,212 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    /**
+     * Pull group metadata from /groups/{rawId} and persist locally, then start
+     * a snapshot listener so future admin edits (rename, member add/remove)
+     * propagate to this device.
+     */
+    private fun discoverGroup(groupId: String) {
+        val rawId = groupId.removePrefix(GROUP_ID_PREFIX)
+        db?.collection("groups")?.document(rawId)?.get()
+            ?.addOnSuccessListener { snap ->
+                val name = snap.getString("name") ?: return@addOnSuccessListener
+                @Suppress("UNCHECKED_CAST")
+                val members = (snap.get("members") as? List<String>) ?: return@addOnSuccessListener
+                val adminId = snap.getString("adminId") ?: return@addOnSuccessListener
+                // Persist locally without re-writing to /groups (the doc already exists).
+                prefs.edit()
+                    .putStringSet(KEY_GROUP_IDS, savedGroupIds() + groupId)
+                    .putString("$KEY_GROUP_NAME_PREFIX$groupId", name)
+                    .putString("$KEY_GROUP_MEMBERS_PREFIX$groupId", members.joinToString(","))
+                    .putString("$KEY_GROUP_ADMIN_PREFIX$groupId", adminId)
+                    .apply()
+                listenToGroup(groupId)
+                runOnUiThread { if (binding.contactListScreen.visibility == View.VISIBLE) renderContacts() }
+            }
+            ?.addOnFailureListener { e -> Log.w(TAG, "discoverGroup($groupId) failed: ${e.message}") }
+    }
+
+    private val groupListeners = mutableMapOf<String, ListenerRegistration>()
+
+    /** Subscribe to admin-driven edits on /groups/{rawId}. Idempotent. */
+    private fun listenToGroup(groupId: String) {
+        if (groupListeners.containsKey(groupId)) return
+        val rawId = groupId.removePrefix(GROUP_ID_PREFIX)
+        val reg = db?.collection("groups")?.document(rawId)
+            ?.addSnapshotListener { snap, _ ->
+                snap ?: return@addSnapshotListener
+                if (!snap.exists()) {
+                    // Group was deleted by admin — drop it locally.
+                    leaveGroupLocally(groupId)
+                    return@addSnapshotListener
+                }
+                val name = snap.getString("name") ?: return@addSnapshotListener
+                @Suppress("UNCHECKED_CAST")
+                val members = (snap.get("members") as? List<String>) ?: return@addSnapshotListener
+                val adminId = snap.getString("adminId") ?: return@addSnapshotListener
+                // If we were removed by admin, treat as forced leave.
+                if (localId !in members) {
+                    leaveGroupLocally(groupId)
+                    return@addSnapshotListener
+                }
+                prefs.edit()
+                    .putString("$KEY_GROUP_NAME_PREFIX$groupId", name)
+                    .putString("$KEY_GROUP_MEMBERS_PREFIX$groupId", members.joinToString(","))
+                    .putString("$KEY_GROUP_ADMIN_PREFIX$groupId", adminId)
+                    .apply()
+                runOnUiThread {
+                    if (remoteId == groupId) {
+                        binding.chatTitle.text = "👥 $name"
+                        binding.chatPeerId.text = "${members.size} members"
+                    }
+                    if (binding.contactListScreen.visibility == View.VISIBLE) renderContacts()
+                }
+            } ?: return
+        groupListeners[groupId] = reg
+    }
+
+    /** Drop a group from local storage (member kicked, admin deleted, or self-leave). */
+    private fun leaveGroupLocally(groupId: String) {
+        groupListeners.remove(groupId)?.remove()
+        prefs.edit()
+            .putStringSet(KEY_GROUP_IDS, savedGroupIds() - groupId)
+            .remove("$KEY_GROUP_NAME_PREFIX$groupId")
+            .remove("$KEY_GROUP_MEMBERS_PREFIX$groupId")
+            .remove("$KEY_GROUP_ADMIN_PREFIX$groupId")
+            .remove(chatLogKey(groupId))
+            .remove("$KEY_CHAT_READ_PREFIX$groupId")
+            .apply()
+        messageLogs.remove(groupId)
+        runOnUiThread {
+            if (remoteId == groupId) {
+                remoteId = ""
+                showContactList()
+            } else {
+                renderContacts()
+            }
+        }
+    }
+
+    /** Admin-only: write updated members list back to /groups/{rawId}. */
+    private fun updateGroupMembers(groupId: String, newMembers: List<String>, newName: String? = null) {
+        val rawId = groupId.removePrefix(GROUP_ID_PREFIX)
+        val patch = mutableMapOf<String, Any>("members" to newMembers)
+        if (newName != null) patch["name"] = newName
+        db?.collection("groups")?.document(rawId)?.update(patch)
+            ?.addOnFailureListener { e ->
+                runOnUiThread { Toast.makeText(this, "Update failed: ${e.message}", Toast.LENGTH_SHORT).show() }
+            }
+    }
+
+    /** Self-leave: remove self from group's member list, then drop locally. */
+    private fun leaveGroup(groupId: String) {
+        val rawId = groupId.removePrefix(GROUP_ID_PREFIX)
+        val currentMembers = groupMembers(groupId)
+        val newMembers = currentMembers.filter { it != localId }
+        val adminId = groupAdmin(groupId)
+        if (adminId == localId) {
+            // Admin can't leave — must delete or transfer first. Force delete on leave.
+            db?.collection("groups")?.document(rawId)?.delete()
+                ?.addOnFailureListener { e -> Log.w(TAG, "group delete failed: ${e.message}") }
+        } else {
+            // Non-admin leave: only admin can rewrite members in v1.14.21 rules.
+            // Work around: ask the admin via a /messages text packet. For MVP,
+            // just delete locally — server will keep stale member list until
+            // admin removes us. Future: server-side "request leave" function.
+            Log.d(TAG, "Self-leave: ${groupId}; admin will see stale entry until they remove us")
+        }
+        leaveGroupLocally(groupId)
+    }
+
+    private fun showGroupInfo(groupId: String) {
+        val name = groupName(groupId)
+        val members = groupMembers(groupId)
+        val adminId = groupAdmin(groupId)
+        val isAdmin = adminId == localId
+
+        val dp = resources.displayMetrics.density
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding((20 * dp).toInt(), (8 * dp).toInt(), (20 * dp).toInt(), 0)
+        }
+        container.addView(android.widget.TextView(this).apply {
+            text = "Members (${members.size})"
+            setPadding(0, 0, 0, (8 * dp).toInt())
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_muted))
+        })
+        members.forEach { mid ->
+            val label = when {
+                mid == localId -> "${contactName(mid)} (you)"
+                mid == adminId -> "${contactName(mid)} (admin)"
+                else -> contactName(mid)
+            }
+            container.addView(android.widget.TextView(this).apply {
+                text = "• $label"
+                setPadding(0, (3 * dp).toInt(), 0, (3 * dp).toInt())
+                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_primary))
+            })
+        }
+
+        val builder = AlertDialog.Builder(this)
+            .setTitle("👥 $name")
+            .setView(container)
+        if (isAdmin) {
+            builder.setPositiveButton("Manage") { _, _ -> showGroupManageDialog(groupId) }
+        }
+        builder.setNeutralButton(if (isAdmin) "Delete group" else "Leave group") { _, _ ->
+            AlertDialog.Builder(this)
+                .setMessage(if (isAdmin) "Delete \"$name\" for everyone?" else "Leave \"$name\"?")
+                .setPositiveButton(if (isAdmin) "Delete" else "Leave") { _, _ -> leaveGroup(groupId) }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+        builder.setNegativeButton("Close", null)
+        builder.show()
+    }
+
+    /** Admin-only: rename + manage member roster. */
+    private fun showGroupManageDialog(groupId: String) {
+        val currentMembers = groupMembers(groupId)
+        val candidates = savedContactIds().sortedBy { contactName(it).lowercase(Locale.US) }
+        val dp = resources.displayMetrics.density
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding((20 * dp).toInt(), (8 * dp).toInt(), (20 * dp).toInt(), 0)
+        }
+        val nameInput = EditText(this).apply {
+            setText(groupName(groupId))
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS
+            maxLines = 1
+        }
+        container.addView(nameInput)
+        container.addView(android.widget.TextView(this).apply {
+            text = "Members"
+            setPadding(0, (12 * dp).toInt(), 0, (4 * dp).toInt())
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_muted))
+        })
+        val checkboxes = candidates.map { id ->
+            android.widget.CheckBox(this).apply {
+                text = contactName(id)
+                tag = id
+                isChecked = id in currentMembers
+            }
+        }
+        checkboxes.forEach { container.addView(it) }
+
+        AlertDialog.Builder(this)
+            .setTitle("Manage group")
+            .setView(container)
+            .setPositiveButton("Save") { _, _ ->
+                val name = nameInput.text.toString().trim().ifBlank { groupName(groupId) }
+                val selected = checkboxes.filter { it.isChecked }.map { it.tag as String }
+                val members = (selected + localId).distinct()
+                updateGroupMembers(groupId, members, newName = name)
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
     /** Persist a newly-created group locally. Also writes the /groups Firestore doc. */
     private fun saveGroup(id: String, name: String, members: List<String>, adminId: String) {
         prefs.edit()
@@ -3153,6 +3368,12 @@ class MainActivity : AppCompatActivity() {
                 "createdAt" to System.currentTimeMillis()
             )
         )?.addOnFailureListener { e -> Log.w(TAG, "group write failed: ${e.message}") }
+        listenToGroup(id)
+    }
+
+    /** Bring up all snapshot listeners for groups we already know about. */
+    private fun resumeAllGroupListeners() {
+        savedGroupIds().forEach { gid -> listenToGroup(gid) }
     }
 
     private fun formatMessageTime(epochMs: Long): String {
@@ -3492,6 +3713,10 @@ class MainActivity : AppCompatActivity() {
     // ─── Contact context menu (long-press) ───────────────────────────────────
 
     private fun showContactContextMenu(id: String) {
+        if (isGroup(id)) {
+            showGroupInfo(id)
+            return
+        }
         AlertDialog.Builder(this)
             .setTitle(contactName(id))
             .setItems(arrayOf("Edit name", "Delete contact")) { _, which ->
