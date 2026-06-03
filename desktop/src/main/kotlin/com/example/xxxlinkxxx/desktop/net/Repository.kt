@@ -114,7 +114,8 @@ class Repository(
                 Crypto.decryptMessage(keyPair, encKey, iv, ct)
             }.getOrNull() ?: continue
             val ts = (fields["createdAt"] as? Long) ?: 0L
-            out.add(InboundMessage(id, from, text, ts))
+            val groupId = (fields["groupId"] as? String)?.takeIf { it.isNotBlank() }
+            out.add(InboundMessage(id, from, text, ts, groupId))
             // best-effort delete (matches MainActivity behaviour after receipt)
             runCatching { firebase.firestoreDelete("messages/$id") }
         }
@@ -147,5 +148,7 @@ class Repository(
         val from: String,
         val text: String,
         val ts: Long,
+        /** Group fan-out doc had a non-blank groupId — route to group chat. */
+        val groupId: String? = null,
     )
 }

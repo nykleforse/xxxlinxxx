@@ -43,11 +43,14 @@ import com.example.xxxlinkxxx.desktop.call.CallOverlay
 import com.example.xxxlinkxxx.desktop.call.CallUiState
 import com.example.xxxlinkxxx.desktop.call.VoiceCallController
 import com.example.xxxlinkxxx.desktop.crypto.Crypto
+import com.example.xxxlinkxxx.desktop.groups.GroupRepository
 import com.example.xxxlinkxxx.desktop.net.FirebaseClient
 import com.example.xxxlinkxxx.desktop.net.Repository
 import com.example.xxxlinkxxx.desktop.security.BackupCodec
 import com.example.xxxlinkxxx.desktop.security.PinLock
 import com.example.xxxlinkxxx.desktop.storage.SecurePrefs
+import com.example.xxxlinkxxx.desktop.update.UpdateChecker
+import java.awt.Desktop
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -91,6 +94,7 @@ private sealed interface AppScreen {
 private sealed interface AuthedSub {
     object ContactList : AuthedSub
     object AddContact : AuthedSub
+    object NewGroup : AuthedSub
     data class Chat(val peerId: String) : AuthedSub
 }
 
@@ -246,6 +250,10 @@ private fun AuthedRoot(
     var pinAttempt by remember { mutableStateOf("") }
     var settingsOpen by remember { mutableStateOf(false) }
     var settingsMsg by remember { mutableStateOf("") }
+    val groupRepo = remember(repo.localId) { GroupRepository(repo, prefs) }
+    val groups = remember {
+        mutableStateListOf<String>().also { it.addAll(groupRepo.savedGroupIds()) }
+    }
     var sub: AuthedSub by remember { mutableStateOf<AuthedSub>(AuthedSub.ContactList) }
     val contacts = remember {
         mutableStateListOf<String>().also { it.addAll(prefs.getStringSet("contact_ids")) }
@@ -301,12 +309,25 @@ private fun AuthedRoot(
             runCatching {
                 val msgs = repo.pollInbox()
                 for (m in msgs) {
-                    val prev = chatLogs[m.from] ?: ""
-                    val line = "${m.from}: ${m.text}"
-                    chatLogs[m.from] = if (prev.isEmpty()) line else "$prev\n$line"
-                    if (m.from !in contacts) {
-                        contacts.add(m.from)
-                        prefs.edit().putStringSet("contact_ids", contacts.toSet()).apply()
+                    val gid = m.groupId
+                    if (gid != null) {
+                        // Auto-discover the group if it's the first time we see it.
+                        if (gid !in groups) {
+                            val ok = runCatching { groupRepo.discoverGroup(gid) }.getOrDefault(false)
+                            if (ok) groups.add(gid)
+                            else continue
+                        }
+                        val prev = chatLogs[gid] ?: ""
+                        val line = "${m.from}: ${m.text}"
+                        chatLogs[gid] = if (prev.isEmpty()) line else "$prev\n$line"
+                    } else {
+                        val prev = chatLogs[m.from] ?: ""
+                        val line = "${m.from}: ${m.text}"
+                        chatLogs[m.from] = if (prev.isEmpty()) line else "$prev\n$line"
+                        if (m.from !in contacts) {
+                            contacts.add(m.from)
+                            prefs.edit().putStringSet("contact_ids", contacts.toSet()).apply()
+                        }
                     }
                     runCatching { repo.writeReceipt(m.id, m.from) }
                 }
@@ -319,7 +340,10 @@ private fun AuthedRoot(
         AuthedSub.ContactList -> ContactListScreen(
             localId = repo.localId,
             contacts = contacts,
+            groups = groups,
+            groupName = { id -> groupRepo.groupName(id) },
             onAdd = { sub = AuthedSub.AddContact },
+            onNewGroup = { sub = AuthedSub.NewGroup },
             onPick = { sub = AuthedSub.Chat(it) },
             onLogout = onLogout,
             onSettings = { settingsOpen = true },
@@ -334,24 +358,50 @@ private fun AuthedRoot(
             },
             onCancel = { sub = AuthedSub.ContactList },
         )
+        AuthedSub.NewGroup -> NewGroupScreen(
+            contacts = contacts,
+            onCreate = { name, selected ->
+                scope.launch {
+                    runCatching { groupRepo.createGroup(name, selected) }
+                        .onSuccess { gid ->
+                            if (gid !in groups) groups.add(gid)
+                            sub = AuthedSub.Chat(gid)
+                        }
+                }
+            },
+            onCancel = { sub = AuthedSub.ContactList },
+        )
         is AuthedSub.Chat -> ChatScreen(
             peerId = s.peerId,
+            isGroup = groupRepo.isGroupId(s.peerId),
+            displayName = if (groupRepo.isGroupId(s.peerId))
+                "👥 ${groupRepo.groupName(s.peerId)}" else s.peerId,
             log = chatLogs[s.peerId] ?: "",
             repo = repo,
             onSend = { text, pk ->
                 scope.launch {
-                    runCatching { repo.sendEncryptedMessage(s.peerId, text, pk) }
-                        .onSuccess {
-                            val prev = chatLogs[s.peerId] ?: ""
-                            val line = "Me: $text"
-                            chatLogs[s.peerId] = if (prev.isEmpty()) line else "$prev\n$line"
-                        }
+                    if (groupRepo.isGroupId(s.peerId)) {
+                        runCatching { groupRepo.sendGroupMessage(s.peerId, text) }
+                            .onSuccess {
+                                val prev = chatLogs[s.peerId] ?: ""
+                                val line = "Me: $text"
+                                chatLogs[s.peerId] = if (prev.isEmpty()) line else "$prev\n$line"
+                            }
+                    } else {
+                        runCatching { repo.sendEncryptedMessage(s.peerId, text, pk) }
+                            .onSuccess {
+                                val prev = chatLogs[s.peerId] ?: ""
+                                val line = "Me: $text"
+                                chatLogs[s.peerId] = if (prev.isEmpty()) line else "$prev\n$line"
+                            }
+                    }
                 }
             },
             onBack = { sub = AuthedSub.ContactList },
             onCall = {
-                runCatching { callController.startOutgoing(s.peerId) }
-                    .onFailure { /* TODO surface toast in UI */ }
+                if (!groupRepo.isGroupId(s.peerId)) {
+                    runCatching { callController.startOutgoing(s.peerId) }
+                }
             },
         )
     }
@@ -384,6 +434,27 @@ private fun AuthedRoot(
                         settingsMsg = "Restored ${r.contactCount} contacts, ${r.chatCount} chats"
                     }
                     .onFailure { settingsMsg = "Restore error: ${it.message}" }
+            },
+            onCheckForUpdates = {
+                settingsMsg = "Checking..."
+                scope.launch {
+                    val info = runCatching { UpdateChecker.checkLatest() }.getOrNull()
+                    if (info == null) {
+                        settingsMsg = "You're on the latest (${UpdateChecker.CURRENT_VERSION})"
+                        return@launch
+                    }
+                    settingsMsg = "Downloading ${info.version}..."
+                    runCatching {
+                        val file = UpdateChecker.downloadMsi(info) { got, total ->
+                            if (total > 0) {
+                                settingsMsg = "Downloading ${info.version} " +
+                                    "${(got * 100 / total)}%"
+                            }
+                        }
+                        settingsMsg = "Launching installer: ${file.name}"
+                        runCatching { Desktop.getDesktop().open(file) }
+                    }.onFailure { settingsMsg = "Update failed: ${it.message}" }
+                }
             },
             onClose = {
                 settingsOpen = false
@@ -449,7 +520,10 @@ private fun AuthedRoot(
 private fun ContactListScreen(
     localId: String,
     contacts: List<String>,
+    groups: List<String>,
+    groupName: (String) -> String,
     onAdd: () -> Unit,
+    onNewGroup: () -> Unit,
     onPick: (String) -> Unit,
     onLogout: () -> Unit,
     onSettings: () -> Unit,
@@ -464,6 +538,8 @@ private fun ContactListScreen(
         Row {
             DarkButton(label = "+ Add", onClick = onAdd)
             Spacer(Modifier.width(8.dp))
+            DarkButton(label = "+ Group", onClick = onNewGroup)
+            Spacer(Modifier.width(8.dp))
             DarkButton(label = "Settings", onClick = onSettings)
             Spacer(Modifier.width(8.dp))
             DarkButton(label = "Log out", onClick = onLogout)
@@ -472,15 +548,25 @@ private fun ContactListScreen(
         Box(Modifier.height(1.dp).fillMaxWidth().background(Line))
         Spacer(Modifier.height(8.dp))
 
-        if (contacts.isEmpty()) {
+        if (contacts.isEmpty() && groups.isEmpty()) {
             Text(
-                "No contacts yet. Press + Add and enter their 8-char ID.",
+                "No contacts or groups yet. Press + Add (peer ID) or + Group.",
                 color = TextMuted,
                 style = Mono.copy(fontSize = 12.sp),
                 modifier = Modifier.padding(top = 24.dp),
             )
         } else {
             LazyColumn(Modifier.fillMaxSize()) {
+                items(groups) { gid ->
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable { onPick(gid) }
+                            .padding(vertical = 10.dp),
+                    ) {
+                        Text("👥 ${groupName(gid)}", color = TextPrimary, style = Mono)
+                    }
+                }
                 items(contacts) { id ->
                     Row(
                         Modifier
@@ -492,6 +578,68 @@ private fun ContactListScreen(
                     }
                 }
             }
+        }
+    }
+}
+
+// ── New group ────────────────────────────────────────────────────────────────
+
+@Composable
+private fun NewGroupScreen(
+    contacts: List<String>,
+    onCreate: (String, List<String>) -> Unit,
+    onCancel: () -> Unit,
+) {
+    var name by remember { mutableStateOf("") }
+    val selected = remember { mutableStateListOf<String>() }
+    Column(Modifier.fillMaxSize().padding(24.dp)) {
+        Text("New group", color = TextPrimary, style = Mono.copy(fontSize = 16.sp))
+        Spacer(Modifier.height(16.dp))
+        FieldBox(width = 320.dp) {
+            TextInputRaw(value = name, onChange = { name = it.take(40) }, placeholder = "Group name")
+        }
+        Spacer(Modifier.height(12.dp))
+        Text("Members", color = TextSecondary, style = Mono.copy(fontSize = 11.sp))
+        Spacer(Modifier.height(6.dp))
+        if (contacts.isEmpty()) {
+            Text(
+                "Add a contact first.",
+                color = TextMuted,
+                style = Mono.copy(fontSize = 12.sp),
+            )
+        } else {
+            Box(Modifier.height(220.dp).fillMaxWidth()) {
+                LazyColumn(Modifier.fillMaxSize()) {
+                    items(contacts) { id ->
+                        val isSel = id in selected
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    if (isSel) selected.remove(id) else selected.add(id)
+                                }
+                                .padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(if (isSel) "[x] " else "[ ] ", color = TextPrimary, style = Mono)
+                            Text(id, color = TextPrimary, style = Mono)
+                        }
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.height(16.dp))
+        Row {
+            DarkButton(
+                label = "Create",
+                onClick = {
+                    val n = name.trim().ifBlank { "Untitled" }
+                    if (selected.isNotEmpty()) onCreate(n, selected.toList())
+                },
+                enabled = selected.isNotEmpty(),
+            )
+            Spacer(Modifier.width(8.dp))
+            DarkButton(label = "Cancel", onClick = onCancel)
         }
     }
 }
@@ -525,6 +673,8 @@ private fun AddContactScreen(onAdd: (String) -> Unit, onCancel: () -> Unit) {
 @Composable
 private fun ChatScreen(
     peerId: String,
+    isGroup: Boolean,
+    displayName: String,
     log: String,
     repo: Repository,
     onSend: (String, String) -> Unit,
@@ -536,24 +686,36 @@ private fun ChatScreen(
     var peerPubkey by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(peerId) {
-        val pk = runCatching { repo.fetchPeerPublicKey(peerId) }.getOrNull()
-        peerPubkey = pk
-        fingerprint = Crypto.pubkeyFingerprint(pk)
+        if (isGroup) {
+            // Group chat — no single peer pubkey. Sender's encrypt step happens
+            // per-member inside GroupRepository.sendGroupMessage, so we just
+            // mark peerPubkey non-null with a sentinel to enable Send button.
+            peerPubkey = "group"
+            fingerprint = ""
+        } else {
+            val pk = runCatching { repo.fetchPeerPublicKey(peerId) }.getOrNull()
+            peerPubkey = pk
+            fingerprint = Crypto.pubkeyFingerprint(pk)
+        }
     }
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             DarkButton(label = "Back", onClick = onBack)
             Spacer(Modifier.width(12.dp))
-            Text(peerId, color = TextPrimary, style = Mono)
+            Text(displayName, color = TextPrimary, style = Mono)
             Spacer(Modifier.width(12.dp))
-            if (fingerprint.isNotEmpty()) {
+            if (isGroup) {
+                Text("(group)", color = TextMuted, style = Mono.copy(fontSize = 11.sp))
+            } else if (fingerprint.isNotEmpty()) {
                 Text(fingerprint, color = TextSecondary, style = Mono.copy(fontSize = 14.sp))
             } else {
                 Text("(no key yet)", color = TextMuted, style = Mono.copy(fontSize = 11.sp))
             }
-            Spacer(Modifier.width(12.dp))
-            DarkButton(label = "Call", onClick = onCall)
+            if (!isGroup) {
+                Spacer(Modifier.width(12.dp))
+                DarkButton(label = "Call", onClick = onCall)
+            }
         }
         Spacer(Modifier.height(12.dp))
         Box(Modifier.height(1.dp).fillMaxWidth().background(Line))
@@ -738,6 +900,7 @@ private fun SettingsOverlay(
     onDisablePin: () -> Unit,
     onExportBackup: () -> Unit,
     onImportBackup: () -> Unit,
+    onCheckForUpdates: () -> Unit,
     onClose: () -> Unit,
 ) {
     var newPin by remember { mutableStateOf("") }
@@ -791,6 +954,17 @@ private fun SettingsOverlay(
                 Spacer(Modifier.width(8.dp))
                 DarkButton(label = "Import...", onClick = onImportBackup)
             }
+            Spacer(Modifier.height(16.dp))
+            Box(Modifier.height(1.dp).fillMaxWidth().background(Line))
+            Spacer(Modifier.height(12.dp))
+            Text("Updates", color = TextSecondary, style = Mono.copy(fontSize = 12.sp))
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Current: v${UpdateChecker.CURRENT_VERSION}",
+                color = TextMuted, style = Mono.copy(fontSize = 11.sp),
+            )
+            Spacer(Modifier.height(8.dp))
+            DarkButton(label = "Check for updates", onClick = onCheckForUpdates)
             if (statusMessage.isNotEmpty()) {
                 Spacer(Modifier.height(12.dp))
                 Text(statusMessage, color = TextSecondary, style = Mono.copy(fontSize = 11.sp))
