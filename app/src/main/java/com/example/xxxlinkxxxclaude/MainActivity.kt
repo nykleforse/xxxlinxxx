@@ -132,6 +132,7 @@ class MainActivity : AppCompatActivity() {
     private var txVoiceSeq = 0
     private var rxVoiceSeq: Int? = null
     private enum class MsgStatus { SENT, DELIVERED, READ }
+    private enum class PhotoState { OK, PENDING, FAILED }
 
     // ConcurrentHashMap: these maps are mutated from main thread (UI events,
     // sendMessage callbacks), signaling thread (DataChannel handleMessagePacket),
@@ -191,6 +192,12 @@ class MainActivity : AppCompatActivity() {
     private var assemblingExpected: Int = 0
     private var assemblingKey: ByteArray? = null
     private var assemblingIv: ByteArray? = null
+    // Watchdog: aborts a stalled receive after PHOTO_RECEIVE_TIMEOUT_MS of inactivity
+    // (no PHO_CHUNK / PHO_END seen). Resets the receiver back to idle so subsequent
+    // incoming transfers can be accepted.
+    @Volatile private var assemblingWatchdog: Runnable? = null
+    /** Snapshot of when this session started; rejects stale `pending` offers older than this. */
+    private val appSessionStartMs: Long = System.currentTimeMillis()
     private var assemblingReceived: Int = 0
 
     private val photoPickerLauncher = registerForActivityResult(
@@ -1370,8 +1377,12 @@ class MainActivity : AppCompatActivity() {
             }
             val lastMsg = if (lastLine == null) "" else {
                 val (_, body) = parseLineAuthorText(lastLine)
-                if (body.startsWith("[PHOTO:") && body.endsWith("]")) "📷 Photo"
-                else body.take(60)
+                when {
+                    body.startsWith("[PHOTO:") && body.endsWith("]") -> "📷 Photo"
+                    body.startsWith("[PHOTO_PENDING:") && body.endsWith("]") -> "⏳ Sending photo"
+                    body.startsWith("[PHOTO_FAILED:") && body.endsWith("]") -> "⚠️ Photo not delivered"
+                    else -> body.take(60)
+                }
             }
             val lastOutgoingStatus: MsgStatus? = lastLine?.let { line ->
                 val (author, _) = parseLineAuthorText(line)
@@ -2796,10 +2807,23 @@ class MainActivity : AppCompatActivity() {
             val lineTs = lineTimestamp(line)
             val onLongClick: () -> Unit = { showMessageContextMenu(chatId, lineTs, text, isOutgoing) }
             binding.messagesContainer.addView(
-                if (text.startsWith("[PHOTO:") && text.endsWith("]")) {
-                    createPhotoBubble(text.removePrefix("[PHOTO:").removeSuffix("]"), isOutgoing, ts, onLongClick)
-                } else {
-                    createTextBubble(text, isOutgoing, ts, status, onLongClick)
+                when {
+                    text.startsWith("[PHOTO:") && text.endsWith("]") -> {
+                        createPhotoBubble(text.removePrefix("[PHOTO:").removeSuffix("]"), isOutgoing, ts, onLongClick)
+                    }
+                    text.startsWith("[PHOTO_PENDING:") && text.endsWith("]") -> {
+                        // path|tid format — drop the |tid suffix for rendering
+                        val body = text.removePrefix("[PHOTO_PENDING:").removeSuffix("]")
+                        val path = body.substringBefore('|')
+                        createPhotoBubble(path, isOutgoing, ts, onLongClick, photoState = PhotoState.PENDING)
+                    }
+                    text.startsWith("[PHOTO_FAILED:") && text.endsWith("]") -> {
+                        val path = text.removePrefix("[PHOTO_FAILED:").removeSuffix("]")
+                        createPhotoBubble(path, isOutgoing, ts, onLongClick, photoState = PhotoState.FAILED)
+                    }
+                    else -> {
+                        createTextBubble(text, isOutgoing, ts, status, onLongClick)
+                    }
                 }
             )
         }
@@ -2890,14 +2914,20 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun createPhotoBubble(path: String, isOutgoing: Boolean, time: String?,
-                                   onLongClick: (() -> Unit)? = null): android.view.View {
+                                   onLongClick: (() -> Unit)? = null,
+                                   photoState: PhotoState = PhotoState.OK): android.view.View {
         val dp = resources.displayMetrics.density
         val maxPx = (220 * dp).toInt()
         val file = java.io.File(path)
 
         // File missing — show placeholder text bubble instead of empty photo bubble
         if (!file.exists()) {
-            return createTextBubble("📷 Photo unavailable", isOutgoing, time, null, onLongClick)
+            val placeholder = when (photoState) {
+                PhotoState.PENDING -> "⏳ Sending photo..."
+                PhotoState.FAILED  -> "⚠️ Photo not delivered"
+                PhotoState.OK      -> "📷 Photo unavailable"
+            }
+            return createTextBubble(placeholder, isOutgoing, time, null, onLongClick)
         }
 
         val imgView = android.widget.ImageView(this).apply {
@@ -2912,6 +2942,12 @@ class MainActivity : AppCompatActivity() {
             adjustViewBounds = true
             maxWidth = maxPx
             setOnClickListener { showFullScreenPhoto(path) }
+            // Dim image while transfer is in-flight or after failure.
+            when (photoState) {
+                PhotoState.PENDING -> alpha = 0.5f
+                PhotoState.FAILED  -> alpha = 0.4f
+                PhotoState.OK      -> { /* default */ }
+            }
         }
 
         val bubbleLayout = android.widget.LinearLayout(this).apply {
@@ -2923,6 +2959,20 @@ class MainActivity : AppCompatActivity() {
             val pad = (6 * dp).toInt()
             setPadding(pad, pad, pad, pad)
             addView(imgView)
+            // Status overlay below the image for non-OK states.
+            if (photoState != PhotoState.OK) {
+                addView(android.widget.TextView(this@MainActivity).apply {
+                    this.text = when (photoState) {
+                        PhotoState.PENDING -> "⏳ Sending..."
+                        PhotoState.FAILED  -> "⚠️ Not delivered"
+                        PhotoState.OK      -> ""
+                    }
+                    textSize = 11f
+                    setTextColor(if (photoState == PhotoState.FAILED) 0xFFE57373.toInt() else 0xFFAAAAAA.toInt())
+                    gravity = android.view.Gravity.END
+                    setPadding(0, (2 * dp).toInt(), 0, 0)
+                })
+            }
             if (time != null) {
                 addView(android.widget.TextView(this@MainActivity).apply {
                     this.text = time
@@ -3832,12 +3882,13 @@ class MainActivity : AppCompatActivity() {
         outgoingPhotoTransferId = transferId
         outgoingPhotoChatId = chatId
 
-        // Save photo locally for sender's chat view
+        // Save photo locally for sender's chat view. Render as PENDING — the
+        // bubble is rewritten to [PHOTO:..] on success or [PHOTO_FAILED:..] on abort.
         val senderPhotoDir = File(filesDir, "photos/$chatId").also { it.mkdirs() }
         val senderPhotoFile = File(senderPhotoDir, "$transferId.jpg")
         senderPhotoFile.writeBytes(photoBytes)
         runOnUiThread {
-            appendMessage(chatId, "Me", "[PHOTO:${senderPhotoFile.absolutePath}]")
+            appendMessage(chatId, "Me", "[PHOTO_PENDING:${senderPhotoFile.absolutePath}|$transferId]")
         }
 
         runOnUiThread { Toast.makeText(this, "Connecting to send photo…", Toast.LENGTH_SHORT).show() }
@@ -3959,7 +4010,34 @@ class MainActivity : AppCompatActivity() {
                     return@addSnapshotListener
                 }
                 val state = snap?.getString("state") ?: return@addSnapshotListener
-                if (state != "accepted") return@addSnapshotListener
+                when (state) {
+                    "rejected" -> {
+                        runOnUiThread {
+                            Toast.makeText(this, "Recipient declined the photo", Toast.LENGTH_SHORT).show()
+                            rewriteChatLogPhotoEntry(chatId, transferId, success = false)
+                        }
+                        cleanupPhotoTransfer()
+                        return@addSnapshotListener
+                    }
+                    "rejected_busy" -> {
+                        runOnUiThread {
+                            Toast.makeText(this, "Recipient is busy with another transfer", Toast.LENGTH_SHORT).show()
+                            rewriteChatLogPhotoEntry(chatId, transferId, success = false)
+                        }
+                        cleanupPhotoTransfer()
+                        return@addSnapshotListener
+                    }
+                    "expired", "failed" -> {
+                        runOnUiThread {
+                            Toast.makeText(this, "Photo transfer was aborted", Toast.LENGTH_SHORT).show()
+                            rewriteChatLogPhotoEntry(chatId, transferId, success = false)
+                        }
+                        cleanupPhotoTransfer()
+                        return@addSnapshotListener
+                    }
+                    "accepted" -> { /* fall through */ }
+                    else -> return@addSnapshotListener
+                }
                 val answer = snap.getString("answer") ?: return@addSnapshotListener
                 if (photoTransferPc == null) return@addSnapshotListener
 
@@ -4057,7 +4135,10 @@ class MainActivity : AppCompatActivity() {
     ) {
         ioScope.launch {
             try {
-                val startPacket = "PHO_START|$transferId|${chunks.size}|$encKeyB64|$ivB64|$chatId"
+                // Protocol-clean PHO_START: 5 fields, no chatId (receiver knows senderId
+                // from Firestore doc + sets outgoingPhotoChatId in proceedWithPhotoOffer).
+                // Old receivers still accept the 6-field variant; new receivers handle both.
+                val startPacket = "PHO_START|$transferId|${chunks.size}|$encKeyB64|$ivB64"
                 sendPhotoPacket(dc, startPacket)
                 chunks.forEachIndexed { index, chunk ->
                     val chunkPacket = "PHO_CHUNK|$transferId|$index|${b64(chunk)}"
@@ -4068,6 +4149,7 @@ class MainActivity : AppCompatActivity() {
 
                 runOnUiThread {
                     Toast.makeText(this@MainActivity, "Photo sent!", Toast.LENGTH_SHORT).show()
+                    rewriteChatLogPhotoEntry(chatId, transferId, success = true)
                 }
 
                 db?.collection("transfers")?.document(transferId)?.update("state", "done")
@@ -4075,7 +4157,18 @@ class MainActivity : AppCompatActivity() {
                 cleanupPhotoTransfer()
 
             } catch (e: Exception) {
-                runOnUiThread { Toast.makeText(this@MainActivity, "Photo send error: ${e.message}", Toast.LENGTH_SHORT).show() }
+                // Send an explicit abort packet so receiver tears down immediately
+                // instead of relying on the watchdog timeout.
+                runCatching { dc.send(DataChannel.Buffer(
+                    java.nio.ByteBuffer.wrap("PHO_ABORT|$transferId".toByteArray(Charsets.UTF_8)),
+                    false
+                )) }
+                runOnUiThread {
+                    Toast.makeText(this@MainActivity, "Photo send error: ${e.message}", Toast.LENGTH_SHORT).show()
+                    rewriteChatLogPhotoEntry(chatId, transferId, success = false)
+                }
+                db?.collection("transfers")?.document(transferId)?.update("state", "failed")
+                    ?.addOnFailureListener { _ -> /* best-effort */ }
                 cleanupPhotoTransfer()
             }
         }
@@ -4119,6 +4212,18 @@ class MainActivity : AppCompatActivity() {
                         val offer = doc.getString("offer") ?: return@forEach
                         val transferId = doc.getString("transferId") ?: doc.id
                         val senderId = doc.getString("senderId") ?: return@forEach
+                        // Skip stale offers (e.g. from a previous app session that crashed
+                        // mid-transfer): a fresh offer is created within a few seconds; an
+                        // offer older than appSessionStart - PHOTO_OFFER_GRACE_MS is junk.
+                        val createdAt = doc.getLong("createdAt") ?: 0L
+                        if (createdAt < appSessionStartMs - PHOTO_OFFER_GRACE_MS) {
+                            Log.d(TAG, "Skipping stale photo offer tid=$transferId createdAt=$createdAt")
+                            // Best-effort cleanup so it doesn't keep replaying on every start.
+                            firestore.collection("transfers").document(doc.id)
+                                .update("state", "expired")
+                                .addOnFailureListener { _ -> /* may have no perms; ignore */ }
+                            return@forEach
+                        }
                         acceptIncomingPhotoTransfer(doc.id, transferId, senderId, offer)
                     }
                 }
@@ -4129,12 +4234,53 @@ class MainActivity : AppCompatActivity() {
         val firestore = db ?: return
         val chatId = senderId
 
+        // Reject-busy: don't silently drop the offer when we're already in another
+        // transfer. Mark the doc rejected so the sender gets immediate feedback.
         if (photoTransferPc != null) {
+            firestore.collection("transfers").document(docId)
+                .update("state", "rejected_busy")
+                .addOnFailureListener { e -> Log.w(TAG, "rejected_busy write failed: ${e.message}") }
+            Log.d(TAG, "Photo transfer $transferId from $senderId rejected: busy with another transfer")
             return
         }
 
+        // Whitelist: known contacts auto-accept; unknown senders prompt for consent.
+        val isKnownContact = prefs.contains(contactNameKey(senderId))
+        if (!isKnownContact) {
+            runOnUiThread {
+                AlertDialog.Builder(this)
+                    .setTitle("Photo from unknown sender")
+                    .setMessage("Receive a photo from $senderId?")
+                    .setPositiveButton("Accept") { _, _ ->
+                        proceedWithPhotoOffer(firestore, docId, transferId, senderId, offer)
+                    }
+                    .setNegativeButton("Reject") { _, _ ->
+                        firestore.collection("transfers").document(docId)
+                            .update("state", "rejected")
+                            .addOnFailureListener { e -> Log.w(TAG, "rejected write failed: ${e.message}") }
+                    }
+                    .setCancelable(false)
+                    .show()
+            }
+            return
+        }
+
+        proceedWithPhotoOffer(firestore, docId, transferId, senderId, offer)
+    }
+
+    private fun proceedWithPhotoOffer(
+        firestore: FirebaseFirestore,
+        docId: String,
+        transferId: String,
+        senderId: String,
+        offer: String
+    ) {
+        val chatId = senderId
         outgoingPhotoTransferId = transferId
         outgoingPhotoChatId = chatId
+        // Arm the inactivity watchdog right after we commit to receive — covers
+        // every path: peer drops before sending data, mid-transfer freeze, etc.
+        armReceiveWatchdog()
 
         runOnUiThread {
             setupPhotoTransferPcReceiver(transferId)
@@ -4244,12 +4390,14 @@ class MainActivity : AppCompatActivity() {
         when {
             packet.startsWith("PHO_START|") -> {
                 val parts = packet.split("|")
-                if (parts.size < 6) return
+                // Accept both v1 (6 fields with chatId) and v2 (5 fields, no chatId).
+                // chatId is unused — we trust outgoingPhotoChatId set by acceptIncoming.
+                if (parts.size < 5) return
                 val transferId = parts[1]
                 val totalChunks = parts[2].toIntOrNull() ?: return
                 val encKeyB64 = parts[3]
                 val ivB64 = parts[4]
-                val chatId = parts[5]
+                val chatId = parts.getOrNull(5) ?: ""
 
                 // Guard against attacker-controlled OOM: cap chunks at a sane upper bound.
                 // 4096 chunks × ~12KB ≈ 48 MB max photo. Photos larger than this are rejected.
@@ -4270,6 +4418,9 @@ class MainActivity : AppCompatActivity() {
                 assemblingExpected = totalChunks
                 assemblingChunks = arrayOfNulls(totalChunks)
                 assemblingReceived = 0
+                // Reset watchdog from "arm" state (set in proceedWithPhotoOffer)
+                // to "active": next 90s of silence aborts.
+                armReceiveWatchdog()
                 val keyParts = encKeyB64.split(":")
                 if (keyParts.size != 3) return
                 val aesKeyBytes = runCatching {
@@ -4304,6 +4455,20 @@ class MainActivity : AppCompatActivity() {
                     arr[index] = data
                     assemblingReceived++
                 }
+                // Reset the watchdog — peer is alive.
+                armReceiveWatchdog()
+            }
+
+            packet.startsWith("PHO_ABORT|") -> {
+                val parts = packet.split("|")
+                if (parts.size < 2) return
+                val transferId = parts[1]
+                if (transferId != assemblingTransferId) return
+                Log.d(TAG, "PHO_ABORT received tid=$transferId")
+                runOnUiThread {
+                    Toast.makeText(this, "Sender aborted the transfer", Toast.LENGTH_SHORT).show()
+                }
+                cleanupPhotoTransfer()
             }
 
             packet.startsWith("PHO_END|") -> {
@@ -4379,6 +4544,74 @@ class MainActivity : AppCompatActivity() {
         assemblingKey = null
         assemblingIv = null
         assemblingReceived = 0
+        cancelReceiveWatchdog()
+    }
+
+    private val receiveWatchdogHandler by lazy { android.os.Handler(mainLooper) }
+
+    private fun armReceiveWatchdog() {
+        cancelReceiveWatchdog()
+        val task = Runnable {
+            val tid = assemblingTransferId
+            if (tid != null) {
+                Log.w(TAG, "Photo receive watchdog fired: tid=$tid, dropping stale assembly")
+                runOnUiThread {
+                    Toast.makeText(this@MainActivity,
+                        "Photo receive timed out — sender unreachable",
+                        Toast.LENGTH_SHORT).show()
+                }
+                cleanupPhotoTransfer()
+            }
+        }
+        assemblingWatchdog = task
+        receiveWatchdogHandler.postDelayed(task, PHOTO_RECEIVE_TIMEOUT_MS)
+    }
+
+    private fun cancelReceiveWatchdog() {
+        assemblingWatchdog?.let { receiveWatchdogHandler.removeCallbacks(it) }
+        assemblingWatchdog = null
+    }
+
+    /**
+     * Rewrites a `[PHOTO_PENDING:path|tid]` chat log entry to either `[PHOTO:path]`
+     * (success) or `[PHOTO_FAILED:path]` (failure). Triggered when the outgoing
+     * transfer completes or aborts. Called on main thread.
+     */
+    private fun rewriteChatLogPhotoEntry(chatId: String, transferId: String, success: Boolean) {
+        val log = messageLogFor(chatId).toString()
+        val pendingMarker = "[PHOTO_PENDING:"
+        val tidTag = "|$transferId]"
+        val rewritten = buildString(log.length) {
+            var i = 0
+            while (i < log.length) {
+                val start = log.indexOf(pendingMarker, i)
+                if (start < 0) {
+                    append(log, i, log.length)
+                    break
+                }
+                append(log, i, start)
+                val end = log.indexOf("]", start)
+                if (end < 0) {
+                    append(log, start, log.length)
+                    break
+                }
+                val full = log.substring(start, end + 1)
+                if (full.endsWith(tidTag)) {
+                    val path = full.removePrefix(pendingMarker).removeSuffix(tidTag)
+                    append(if (success) "[PHOTO:$path]" else "[PHOTO_FAILED:$path]")
+                } else {
+                    append(full)
+                }
+                i = end + 1
+            }
+        }
+        if (rewritten != log) {
+            messageLogs[chatId] = StringBuilder(rewritten)
+            prefs.edit().putString(chatLogKey(chatId), rewritten).apply()
+            if (binding.chatScreen.visibility == View.VISIBLE && chatId == remoteId) {
+                refreshChatDisplay(chatId)
+            }
+        }
     }
 
     private fun cleanupPhotoTransfer() {
@@ -5089,6 +5322,11 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_AUTH_VERSION = "auth_version"
         private const val KEY_V2_CRYPTO_SECRET = "v2_crypto_secret"
         private const val V2_PBKDF2_ITERS = 600_000
+        // ── Photo transfer hardening (v1.14.16) ──────────────────────────
+        /** Stale-offer cutoff: ignore pending transfers older than this when listening. */
+        private const val PHOTO_OFFER_GRACE_MS = 60_000L
+        /** Receive-side inactivity timeout. Resets on every PHO_CHUNK. */
+        private const val PHOTO_RECEIVE_TIMEOUT_MS = 90_000L
         private const val KEY_APP_PIN_SALT = "app_pin_salt"
         private const val KEY_PIN_FAILURES = "app_pin_failures"
         private const val KEY_PIN_LOCKOUT_UNTIL = "app_pin_lockout_until"
