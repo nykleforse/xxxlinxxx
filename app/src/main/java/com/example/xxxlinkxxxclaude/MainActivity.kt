@@ -452,6 +452,55 @@ class MainActivity : AppCompatActivity() {
             }
     }
 
+    /**
+     * Installs a default uncaught-exception handler that appends the crash
+     * stack trace to the beta log file before delegating to the system handler
+     * (which kills the process). Idempotent across calls — chains to whatever
+     * was installed before.
+     */
+    private fun installCrashLogger() {
+        val prior = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { t, e ->
+            runCatching {
+                val file = com.example.p2pcodec2.BetaLogger.currentLogFile(this)
+                file.parentFile?.mkdirs()
+                java.io.FileOutputStream(file, true).use { out ->
+                    val ts = System.currentTimeMillis()
+                    out.write("\n=== UNCAUGHT EXCEPTION $ts thread=${t.name} ===\n".toByteArray())
+                    val sw = java.io.StringWriter()
+                    e.printStackTrace(java.io.PrintWriter(sw))
+                    out.write(sw.toString().toByteArray())
+                    out.write("\n".toByteArray())
+                }
+            }
+            prior?.uncaughtException(t, e)
+        }
+    }
+
+    private fun shareBetaLog() {
+        ioScope.launch {
+            val file = com.example.p2pcodec2.BetaLogger.snapshot(this@MainActivity)
+            withContext(Dispatchers.Main) {
+                if (!file.exists() || file.length() == 0L) {
+                    Toast.makeText(this@MainActivity, "No beta logs yet", Toast.LENGTH_SHORT).show()
+                    return@withContext
+                }
+                val uri = FileProvider.getUriForFile(
+                    this@MainActivity,
+                    "${packageName}.fileprovider",
+                    file
+                )
+                val intent = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_STREAM, uri)
+                    putExtra(Intent.EXTRA_SUBJECT, "X-link beta log ${BuildConfig.VERSION_NAME}")
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                startActivity(Intent.createChooser(intent, "Share beta log"))
+            }
+        }
+    }
+
     /** Called once auth is established. Triggers bindLocalId if we have an identity. */
     private fun onAuthReady() {
         // Defer until both authUid and EC keypair + localId are ready.
@@ -501,6 +550,13 @@ class MainActivity : AppCompatActivity() {
     private fun startCore() {
         if (coreStarted) return
         coreStarted = true
+        // Beta-only diagnostics: capture this app's logcat output to a rotating
+        // file under filesDir/beta_logs/log.txt + install a crash hook that
+        // appends the stack trace to the same file before the process dies.
+        if (BuildConfig.VERSION_NAME.contains("beta", ignoreCase = true)) {
+            com.example.p2pcodec2.BetaLogger.start(this, ioScope)
+            installCrashLogger()
+        }
         // Bind localId to current Firebase Auth uid (idempotent for same uid,
         // also re-binds to a new uid when the user logs in on a fresh install).
         onAuthReady()
@@ -934,6 +990,10 @@ class MainActivity : AppCompatActivity() {
         binding.btnCheckBeta.setOnClickListener {
             binding.drawerLayout.closeDrawer(GravityCompat.START)
             checkForBeta()
+        }
+        binding.btnShareBetaLog.setOnClickListener {
+            binding.drawerLayout.closeDrawer(GravityCompat.START)
+            shareBetaLog()
         }
         binding.btnLogout.setOnClickListener {
             binding.drawerLayout.closeDrawer(GravityCompat.START)

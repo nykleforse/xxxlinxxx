@@ -944,6 +944,13 @@
                     <TextView style="@style/DrawerItemText" android:text="Check beta" />
                 </LinearLayout>
 
+                <LinearLayout
+                    android:id="@+id/btnShareBetaLog"
+                    style="@style/DrawerItem">
+                    <TextView style="@style/DrawerItemIcon" android:text="&#9881;" />
+                    <TextView style="@style/DrawerItemText" android:text="Share beta log" />
+                </LinearLayout>
+
                 <!-- Section: Security -->
                 <TextView
                     style="@style/DrawerSection"
