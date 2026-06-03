@@ -745,178 +745,207 @@
     <!-- ═══════════════════════════  SIDE DRAWER  ════════════════════════════ -->
     <LinearLayout
         android:id="@+id/navDrawer"
-        android:layout_width="280dp"
+        android:layout_width="300dp"
         android:layout_height="match_parent"
         android:layout_gravity="start"
         android:background="@color/oled_black"
-        android:orientation="vertical"
-        android:padding="16dp">
+        android:orientation="vertical">
 
-        <!-- Drawer header -->
+        <!-- Profile card (header) -->
         <LinearLayout
             android:layout_width="match_parent"
-            android:layout_height="48dp"
-            android:gravity="center_vertical"
-            android:orientation="horizontal">
+            android:layout_height="wrap_content"
+            android:background="#FF111111"
+            android:orientation="vertical"
+            android:paddingStart="20dp"
+            android:paddingTop="24dp"
+            android:paddingEnd="12dp"
+            android:paddingBottom="20dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="X-link"
+                    android:textColor="@color/text_primary"
+                    android:textSize="20sp"
+                    android:textStyle="bold" />
+
+                <Button
+                    android:id="@+id/btnDrawerClose"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:gravity="center"
+                    android:includeFontPadding="false"
+                    android:minWidth="0dp"
+                    android:minHeight="0dp"
+                    android:padding="0dp"
+                    android:text="&#10005;"
+                    android:textColor="@color/text_muted"
+                    android:textSize="16sp" />
+            </LinearLayout>
 
             <TextView
-                android:layout_width="0dp"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="X-link"
-                android:textColor="@color/text_primary"
-                android:textSize="22sp"
-                android:textStyle="bold" />
+                android:layout_marginTop="20dp"
+                android:text="YOUR ID"
+                android:textColor="@color/text_muted"
+                android:textSize="10sp"
+                android:letterSpacing="0.15" />
 
-            <Button
-                android:id="@+id/btnDrawerClose"
-                android:layout_width="40dp"
-                android:layout_height="40dp"
-                android:background="?attr/selectableItemBackgroundBorderless"
-                android:gravity="center"
-                android:includeFontPadding="false"
-                android:minWidth="0dp"
-                android:minHeight="0dp"
-                android:padding="0dp"
-                android:text="&#10005;"
-                android:textColor="@color/text_secondary"
-                android:textSize="18sp" />
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/myId"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:fontFamily="monospace"
+                    android:singleLine="true"
+                    android:textColor="@color/text_primary"
+                    android:textSize="20sp"
+                    android:textStyle="bold"
+                    tools:text="7F31A2C0" />
+
+                <ImageButton
+                    android:id="@+id/btnCopyMyId"
+                    android:layout_width="40dp"
+                    android:layout_height="40dp"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:contentDescription="Copy ID"
+                    android:padding="10dp"
+                    android:scaleType="center"
+                    android:src="@drawable/ic_copy_24" />
+            </LinearLayout>
         </LinearLayout>
 
-        <!-- ID row -->
-        <LinearLayout
+        <!-- Scrollable menu items -->
+        <ScrollView
             android:layout_width="match_parent"
-            android:layout_height="48dp"
-            android:layout_marginTop="8dp"
-            android:gravity="center_vertical"
-            android:orientation="horizontal">
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:fillViewport="true"
+            android:scrollbars="none">
 
-            <TextView
-                android:id="@+id/myId"
-                android:layout_width="0dp"
+            <LinearLayout
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:singleLine="true"
-                android:textColor="@color/text_primary"
-                android:textSize="15sp"
-                android:textStyle="bold"
-                tools:text="Your ID: 7F31A2C0" />
+                android:orientation="vertical"
+                android:paddingTop="8dp">
 
-            <ImageButton
-                android:id="@+id/btnCopyMyId"
-                android:layout_width="40dp"
-                android:layout_height="40dp"
-                android:background="?attr/selectableItemBackgroundBorderless"
-                android:contentDescription="Copy ID"
-                android:padding="10dp"
-                android:scaleType="center"
-                android:src="@drawable/ic_copy_24" />
-        </LinearLayout>
+                <!-- Section: Account -->
+                <TextView
+                    style="@style/DrawerSection"
+                    android:text="Account" />
 
-        <!-- Divider -->
-        <View
-            android:layout_width="match_parent"
-            android:layout_height="1dp"
-            android:layout_marginTop="8dp"
-            android:layout_marginBottom="12dp"
-            android:background="@color/line" />
+                <LinearLayout
+                    android:id="@+id/btnDrawerShowQr"
+                    style="@style/DrawerItem">
+                    <TextView style="@style/DrawerItemIcon" android:text="&#9633;" />
+                    <TextView style="@style/DrawerItemText" android:text="Show my QR" />
+                </LinearLayout>
 
-        <!-- QR buttons -->
-        <Button
-            android:id="@+id/btnDrawerShowQr"
-            android:layout_width="match_parent"
-            android:layout_height="48dp"
-            android:backgroundTint="@color/control"
-            android:text="Show my QR"
-            android:textColor="@color/text_primary" />
+                <LinearLayout
+                    android:id="@+id/btnDrawerScanQr"
+                    style="@style/DrawerItem">
+                    <TextView style="@style/DrawerItemIcon" android:text="&#9678;" />
+                    <TextView style="@style/DrawerItemText" android:text="Scan QR code" />
+                </LinearLayout>
 
-        <Button
-            android:id="@+id/btnDrawerScanQr"
-            android:layout_width="match_parent"
-            android:layout_height="48dp"
-            android:layout_marginTop="8dp"
-            android:backgroundTint="@color/control"
-            android:text="Scan QR code"
-            android:textColor="@color/text_primary" />
+                <!-- Section: Data -->
+                <TextView
+                    style="@style/DrawerSection"
+                    android:text="Data" />
 
-        <!-- Divider -->
-        <View
-            android:layout_width="match_parent"
-            android:layout_height="1dp"
-            android:layout_marginTop="16dp"
-            android:layout_marginBottom="12dp"
-            android:background="@color/line" />
+                <LinearLayout
+                    android:id="@+id/btnExportBackup"
+                    style="@style/DrawerItem">
+                    <TextView style="@style/DrawerItemIcon" android:text="&#8593;" />
+                    <TextView style="@style/DrawerItemText" android:text="Backup" />
+                </LinearLayout>
 
-        <!-- Backup buttons -->
-        <Button
-            android:id="@+id/btnExportBackup"
-            android:layout_width="match_parent"
-            android:layout_height="48dp"
-            android:backgroundTint="@color/control"
-            android:text="Backup"
-            android:textColor="@color/text_primary" />
+                <LinearLayout
+                    android:id="@+id/btnImportBackup"
+                    style="@style/DrawerItem">
+                    <TextView style="@style/DrawerItemIcon" android:text="&#8595;" />
+                    <TextView style="@style/DrawerItemText" android:text="Restore" />
+                </LinearLayout>
 
-        <Button
-            android:id="@+id/btnImportBackup"
-            android:layout_width="match_parent"
-            android:layout_height="48dp"
-            android:layout_marginTop="8dp"
-            android:backgroundTint="@color/control"
-            android:text="Restore"
-            android:textColor="@color/text_primary" />
+                <!-- Section: Updates -->
+                <TextView
+                    style="@style/DrawerSection"
+                    android:text="Updates" />
 
-        <!-- Divider -->
-        <View
-            android:layout_width="match_parent"
-            android:layout_height="1dp"
-            android:layout_marginTop="16dp"
-            android:layout_marginBottom="12dp"
-            android:background="@color/line" />
+                <LinearLayout
+                    android:id="@+id/btnCheckUpdates"
+                    style="@style/DrawerItem">
+                    <TextView style="@style/DrawerItemIcon" android:text="&#8635;" />
+                    <TextView style="@style/DrawerItemText" android:text="Check for updates" />
+                </LinearLayout>
 
-        <!-- Update buttons -->
-        <Button
-            android:id="@+id/btnCheckUpdates"
-            android:layout_width="match_parent"
-            android:layout_height="48dp"
-            android:backgroundTint="@color/control"
-            android:text="Check for updates"
-            android:textColor="@color/text_primary" />
+                <LinearLayout
+                    android:id="@+id/btnCheckBeta"
+                    style="@style/DrawerItem">
+                    <TextView style="@style/DrawerItemIcon" android:text="&#946;" />
+                    <TextView style="@style/DrawerItemText" android:text="Check beta" />
+                </LinearLayout>
 
-        <Button
-            android:id="@+id/btnCheckBeta"
-            android:layout_width="match_parent"
-            android:layout_height="48dp"
-            android:layout_marginTop="8dp"
-            android:backgroundTint="@color/control"
-            android:text="Check beta"
-            android:textColor="@color/text_secondary" />
+                <!-- Section: Security -->
+                <TextView
+                    style="@style/DrawerSection"
+                    android:text="Security" />
 
-        <!-- Divider -->
-        <View
-            android:layout_width="match_parent"
-            android:layout_height="1dp"
-            android:layout_marginTop="16dp"
-            android:layout_marginBottom="12dp"
-            android:background="@color/line" />
+                <LinearLayout
+                    android:id="@+id/btnAppLock"
+                    style="@style/DrawerItem">
+                    <TextView style="@style/DrawerItemIcon" android:text="&#9737;" />
+                    <TextView
+                        android:id="@+id/btnAppLockText"
+                        style="@style/DrawerItemText"
+                        android:text="App lock: OFF" />
+                </LinearLayout>
 
-        <!-- App lock -->
-        <Button
-            android:id="@+id/btnAppLock"
-            android:layout_width="match_parent"
-            android:layout_height="48dp"
-            android:backgroundTint="@color/control"
-            android:text="App lock: OFF"
-            android:textColor="@color/text_primary" />
+                <!-- Section: Account actions -->
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="1dp"
+                    android:layout_marginStart="20dp"
+                    android:layout_marginTop="16dp"
+                    android:layout_marginEnd="20dp"
+                    android:layout_marginBottom="8dp"
+                    android:background="@color/line" />
 
-        <!-- Logout -->
-        <Button
-            android:id="@+id/btnLogout"
-            android:layout_width="match_parent"
-            android:layout_height="48dp"
-            android:layout_marginTop="8dp"
-            android:backgroundTint="#7B1010"
-            android:text="Log out / Change account"
-            android:textColor="#FFCCCC" />
+                <LinearLayout
+                    android:id="@+id/btnLogout"
+                    style="@style/DrawerItem">
+                    <TextView
+                        style="@style/DrawerItemIcon"
+                        android:text="&#8635;"
+                        android:textColor="#FF8A8A" />
+                    <TextView
+                        style="@style/DrawerItemText"
+                        android:text="Log out / Change account"
+                        android:textColor="#FF8A8A" />
+                </LinearLayout>
+
+                <Space
+                    android:layout_width="match_parent"
+                    android:layout_height="16dp" />
+            </LinearLayout>
+        </ScrollView>
 
     </LinearLayout>
 

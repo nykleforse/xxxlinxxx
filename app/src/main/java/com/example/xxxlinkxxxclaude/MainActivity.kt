@@ -283,7 +283,7 @@ class MainActivity : AppCompatActivity() {
         localId = id
         prefs.edit().putString(KEY_LOCAL_ID, localId).apply()
         receivedMessageIds += prefs.getStringSet(KEY_SEEN_MESSAGE_IDS, emptySet()).orEmpty()
-        binding.myId.text = "Your ID: $localId"
+        binding.myId.text = localId
         binding.photoAuthScreen.visibility = View.GONE
         binding.contactListScreen.visibility = View.VISIBLE
 
@@ -3104,7 +3104,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateAppLockButton() {
         val lockEnabled = prefs.getBoolean(KEY_APP_LOCK_ENABLED, false)
-        binding.btnAppLock.text = if (lockEnabled) "App lock: ON" else "App lock: OFF"
+        binding.btnAppLockText.text = if (lockEnabled) "App lock: ON" else "App lock: OFF"
     }
 
     /**
