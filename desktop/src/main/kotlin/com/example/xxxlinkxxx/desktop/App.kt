@@ -30,6 +30,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -46,6 +47,7 @@ import com.example.xxxlinkxxx.desktop.crypto.Crypto
 import com.example.xxxlinkxxx.desktop.groups.GroupRepository
 import com.example.xxxlinkxxx.desktop.net.FirebaseClient
 import com.example.xxxlinkxxx.desktop.net.Repository
+import com.example.xxxlinkxxx.desktop.photo.PhotoTransferController
 import com.example.xxxlinkxxx.desktop.security.BackupCodec
 import com.example.xxxlinkxxx.desktop.security.PinLock
 import com.example.xxxlinkxxx.desktop.storage.SecurePrefs
@@ -79,6 +81,19 @@ private val Mono = TextStyle(
 
 private const val FB_API_KEY = "AIzaSyAVJQ8ULFuZ6XMA81UoMwuiiXmJCd201tw"
 private const val FB_PROJECT_ID = "xxxlinkxxx-81cbf"
+
+// ── Chat message model + status enum ─────────────────────────────────────────
+
+enum class MsgStatus { UNKNOWN, SENT, DELIVERED, READ }
+
+data class ChatMessage(
+    val id: String,
+    val author: String,         // "Me" or peer localId
+    val text: String,
+    val ts: Long,
+    val replyTo: String? = null,
+    var status: MsgStatus = MsgStatus.UNKNOWN,
+)
 
 // ── App state machine ────────────────────────────────────────────────────────
 
@@ -258,8 +273,27 @@ private fun AuthedRoot(
     val contacts = remember {
         mutableStateListOf<String>().also { it.addAll(prefs.getStringSet("contact_ids")) }
     }
-    val chatLogs = remember { mutableStateMapOf<String, String>() }
+    val chatLogs = remember { mutableStateMapOf<String, SnapshotStateList<ChatMessage>>() }
     val scope = rememberCoroutineScope()
+
+    val photoTransfer = remember(repo.localId) {
+        PhotoTransferController(
+            repo = repo,
+            myKeyPair = keyPairFromPrefs(prefs, photoSecret),
+            onIncoming = { from, file ->
+                appendMessage(
+                    chatLogs, from,
+                    "photo-${System.currentTimeMillis()}",
+                    from, "[PHOTO:${file.absolutePath}]",
+                    System.currentTimeMillis(),
+                )
+            },
+        )
+    }
+    DisposableEffect(photoTransfer) {
+        photoTransfer.startIncomingWatch()
+        onDispose { photoTransfer.dispose() }
+    }
 
     // VoiceCallController lifetime = AuthedRoot lifetime. Disposed on logout
     // so PeerConnectionFactory + Firestore polling shut down cleanly.
@@ -311,25 +345,49 @@ private fun AuthedRoot(
                 for (m in msgs) {
                     val gid = m.groupId
                     if (gid != null) {
-                        // Auto-discover the group if it's the first time we see it.
                         if (gid !in groups) {
                             val ok = runCatching { groupRepo.discoverGroup(gid) }.getOrDefault(false)
                             if (ok) groups.add(gid)
                             else continue
                         }
-                        val prev = chatLogs[gid] ?: ""
-                        val line = "${m.from}: ${m.text}"
-                        chatLogs[gid] = if (prev.isEmpty()) line else "$prev\n$line"
+                        appendMessage(chatLogs, gid, m.id, m.from, m.text, m.ts, m.replyTo)
                     } else {
-                        val prev = chatLogs[m.from] ?: ""
-                        val line = "${m.from}: ${m.text}"
-                        chatLogs[m.from] = if (prev.isEmpty()) line else "$prev\n$line"
+                        appendMessage(chatLogs, m.from, m.id, m.from, m.text, m.ts, m.replyTo)
                         if (m.from !in contacts) {
                             contacts.add(m.from)
                             prefs.edit().putStringSet("contact_ids", contacts.toSet()).apply()
                         }
                     }
                     runCatching { repo.writeReceipt(m.id, m.from) }
+                }
+            }
+            delay(5_000)
+        }
+    }
+
+    // Receipt poller: drives ✓ / ✓✓ ticks on outgoing messages by reading
+    // back our own /receipts/{msgId} writes from the recipients.
+    LaunchedEffect(repo.localId) {
+        while (true) {
+            runCatching {
+                val receipts = repo.pollReceipts()
+                if (receipts.isNotEmpty()) {
+                    for ((_, list) in chatLogs) {
+                        for (msg in list) {
+                            if (msg.author != "Me") continue
+                            // 1:1 receipt id == msgId. Group fan-out IDs look like
+                            // "${msgId}-${memberId}" — match on prefix.
+                            val match = receipts.firstOrNull {
+                                it.msgId == msg.id || it.msgId.startsWith("${msg.id}-")
+                            } ?: continue
+                            val newStatus = when {
+                                match.read -> MsgStatus.READ
+                                match.delivered -> MsgStatus.DELIVERED
+                                else -> MsgStatus.SENT
+                            }
+                            if (msg.status != newStatus) msg.status = newStatus
+                        }
+                    }
                 }
             }
             delay(5_000)
@@ -376,23 +434,44 @@ private fun AuthedRoot(
             isGroup = groupRepo.isGroupId(s.peerId),
             displayName = if (groupRepo.isGroupId(s.peerId))
                 "👥 ${groupRepo.groupName(s.peerId)}" else s.peerId,
-            log = chatLogs[s.peerId] ?: "",
+            messages = chatLogs[s.peerId] ?: mutableStateListOf(),
             repo = repo,
-            onSend = { text, pk ->
+            onSendPhoto = if (!groupRepo.isGroupId(s.peerId)) {
+                {
+                    val file = openImageDialog()
+                    if (file != null) {
+                        photoTransfer.sendPhoto(s.peerId, file)
+                        appendMessage(
+                            chatLogs, s.peerId,
+                            "photo-${System.currentTimeMillis()}",
+                            "Me", "[PHOTO:${file.absolutePath}]",
+                            System.currentTimeMillis(),
+                            initialStatus = MsgStatus.SENT,
+                        )
+                    }
+                }
+            } else null,
+            onSend = { text, pk, replyTo ->
                 scope.launch {
                     if (groupRepo.isGroupId(s.peerId)) {
-                        runCatching { groupRepo.sendGroupMessage(s.peerId, text) }
-                            .onSuccess {
-                                val prev = chatLogs[s.peerId] ?: ""
-                                val line = "Me: $text"
-                                chatLogs[s.peerId] = if (prev.isEmpty()) line else "$prev\n$line"
+                        runCatching { groupRepo.sendGroupMessage(s.peerId, text, replyTo) }
+                            .onSuccess { msgId ->
+                                if (msgId != null) {
+                                    appendMessage(
+                                        chatLogs, s.peerId, msgId, "Me", text,
+                                        System.currentTimeMillis(), replyTo,
+                                        initialStatus = MsgStatus.SENT,
+                                    )
+                                }
                             }
                     } else {
-                        runCatching { repo.sendEncryptedMessage(s.peerId, text, pk) }
-                            .onSuccess {
-                                val prev = chatLogs[s.peerId] ?: ""
-                                val line = "Me: $text"
-                                chatLogs[s.peerId] = if (prev.isEmpty()) line else "$prev\n$line"
+                        runCatching { repo.sendEncryptedMessage(s.peerId, text, pk, replyTo) }
+                            .onSuccess { msgId ->
+                                appendMessage(
+                                    chatLogs, s.peerId, msgId, "Me", text,
+                                    System.currentTimeMillis(), replyTo,
+                                    initialStatus = MsgStatus.SENT,
+                                )
                             }
                     }
                 }
@@ -675,21 +754,20 @@ private fun ChatScreen(
     peerId: String,
     isGroup: Boolean,
     displayName: String,
-    log: String,
+    messages: SnapshotStateList<ChatMessage>,
     repo: Repository,
-    onSend: (String, String) -> Unit,
+    onSend: (String, String, String?) -> Unit,
+    onSendPhoto: (() -> Unit)? = null,
     onBack: () -> Unit,
     onCall: () -> Unit,
 ) {
     var input by remember { mutableStateOf("") }
     var fingerprint by remember { mutableStateOf("") }
     var peerPubkey by remember { mutableStateOf<String?>(null) }
+    var replyTarget by remember { mutableStateOf<ChatMessage?>(null) }
 
     LaunchedEffect(peerId) {
         if (isGroup) {
-            // Group chat — no single peer pubkey. Sender's encrypt step happens
-            // per-member inside GroupRepository.sendGroupMessage, so we just
-            // mark peerPubkey non-null with a sentinel to enable Send button.
             peerPubkey = "group"
             fingerprint = ""
         } else {
@@ -721,25 +799,63 @@ private fun ChatScreen(
         Box(Modifier.height(1.dp).fillMaxWidth().background(Line))
         Spacer(Modifier.height(8.dp))
 
+        // Message list.
         Box(
             Modifier
                 .fillMaxWidth()
-                .height(360.dp)
+                .height(340.dp)
                 .background(Surface, RoundedCornerShape(4.dp))
                 .padding(8.dp),
         ) {
-            val scroll = rememberScrollState()
-            Text(
-                text = log.ifEmpty { "(empty)" },
-                color = TextPrimary,
-                style = Mono.copy(fontSize = 12.sp),
-                modifier = Modifier.fillMaxSize().verticalScroll(scroll),
-            )
+            if (messages.isEmpty()) {
+                Text(
+                    "(empty)",
+                    color = TextMuted,
+                    style = Mono.copy(fontSize = 12.sp),
+                )
+            } else {
+                LazyColumn(Modifier.fillMaxSize()) {
+                    items(messages.size) { idx ->
+                        val msg = messages[idx]
+                        val replyPreview: String? = msg.replyTo?.let { rid ->
+                            val target: ChatMessage? = messages.firstOrNull { m -> m.id == rid }
+                            target?.let { t -> "${t.author}: ${t.text.take(60)}" }
+                        }
+                        MessageRow(
+                            msg = msg,
+                            replyPreview = replyPreview,
+                            onReply = { replyTarget = msg },
+                        )
+                    }
+                }
+            }
         }
-        Spacer(Modifier.height(8.dp))
 
+        // Reply banner.
+        replyTarget?.let { rt ->
+            Spacer(Modifier.height(4.dp))
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFF181818), RoundedCornerShape(4.dp))
+                    .border(1.dp, Line, RoundedCornerShape(4.dp))
+                    .padding(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "↩ ${rt.author}: ${rt.text.take(60)}",
+                    color = TextSecondary,
+                    style = Mono.copy(fontSize = 11.sp),
+                    modifier = Modifier.padding(end = 8.dp),
+                )
+                Spacer(Modifier.width(8.dp))
+                DarkButton(label = "x", onClick = { replyTarget = null })
+            }
+        }
+
+        Spacer(Modifier.height(8.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            FieldBox(width = 440.dp) {
+            FieldBox(width = 380.dp) {
                 TextInputRaw(
                     value = input,
                     onChange = { input = it },
@@ -747,19 +863,108 @@ private fun ChatScreen(
                 )
             }
             Spacer(Modifier.width(8.dp))
+            if (onSendPhoto != null) {
+                DarkButton(label = "📷", onClick = onSendPhoto)
+                Spacer(Modifier.width(8.dp))
+            }
             DarkButton(
                 label = "Send",
                 onClick = {
                     val text = input.trim()
                     val pk = peerPubkey ?: return@DarkButton
                     if (text.isEmpty()) return@DarkButton
-                    onSend(text, pk)
+                    onSend(text, pk, replyTarget?.id)
                     input = ""
+                    replyTarget = null
                 },
                 enabled = peerPubkey != null,
             )
         }
     }
+}
+
+/**
+ * One message row. Click anywhere on a non-Me message → set reply target.
+ * Ticks (✓ / ✓✓) render to the right of "Me" bubbles only.
+ */
+@Composable
+private fun MessageRow(msg: ChatMessage, replyPreview: String?, onReply: () -> Unit) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onReply)
+            .padding(vertical = 4.dp),
+    ) {
+        if (replyPreview != null) {
+            Text(
+                "↳ $replyPreview",
+                color = TextMuted,
+                style = Mono.copy(fontSize = 10.sp),
+                modifier = Modifier.padding(start = 14.dp),
+            )
+        }
+        Row {
+            val authorColor = if (msg.author == "Me") Accent else TextSecondary
+            Text(
+                "${msg.author}: ",
+                color = authorColor,
+                style = Mono.copy(fontSize = 12.sp),
+            )
+            val photoPath = parsePhotoPath(msg.text)
+            if (photoPath != null) {
+                Text(
+                    "📷 ${File(photoPath).name}",
+                    color = Accent,
+                    style = Mono.copy(fontSize = 12.sp),
+                    modifier = Modifier.clickable {
+                        runCatching { Desktop.getDesktop().open(File(photoPath)) }
+                    },
+                )
+            } else {
+                Text(msg.text, color = TextPrimary, style = Mono.copy(fontSize = 12.sp))
+            }
+            if (msg.author == "Me") {
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    statusTick(msg.status),
+                    color = if (msg.status == MsgStatus.READ) Accent else TextMuted,
+                    style = Mono.copy(fontSize = 11.sp),
+                )
+            }
+        }
+    }
+}
+
+private fun parsePhotoPath(text: String): String? {
+    if (!text.startsWith("[PHOTO:")) return null
+    val end = text.indexOf(']')
+    if (end <= 7) return null
+    return text.substring(7, end)
+}
+
+private fun statusTick(status: MsgStatus): String = when (status) {
+    MsgStatus.UNKNOWN -> "·"
+    MsgStatus.SENT -> "✓"
+    MsgStatus.DELIVERED -> "✓✓"
+    MsgStatus.READ -> "✓✓"
+}
+
+/** Append a chat message (creates the per-chat list lazily). */
+private fun appendMessage(
+    chatLogs: MutableMap<String, SnapshotStateList<ChatMessage>>,
+    chatId: String,
+    msgId: String,
+    author: String,
+    text: String,
+    ts: Long,
+    replyTo: String? = null,
+    initialStatus: MsgStatus = MsgStatus.UNKNOWN,
+) {
+    val list = chatLogs.getOrPut(chatId) { mutableStateListOf() }
+    // Deduplicate on msgId so the poller doesn't double-append after a
+    // server-side retry.
+    if (list.any { it.id == msgId }) return
+    list.add(ChatMessage(msgId, author, text, ts, replyTo, initialStatus))
 }
 
 // ── Reusable widgets ─────────────────────────────────────────────────────────
@@ -849,6 +1054,35 @@ private fun openBackupDialog(): File? {
     val name = fd.file ?: return null
     val dir = fd.directory ?: return null
     return File(dir, name)
+}
+
+private fun openImageDialog(): File? {
+    val fd = FileDialog(null as Frame?, "Send photo", FileDialog.LOAD).apply {
+        setFilenameFilter { _, name ->
+            name.endsWith(".jpg", true) ||
+                name.endsWith(".jpeg", true) ||
+                name.endsWith(".png", true) ||
+                name.endsWith(".webp", true) ||
+                name.endsWith(".heic", true)
+        }
+        isVisible = true
+    }
+    val name = fd.file ?: return null
+    val dir = fd.directory ?: return null
+    return File(dir, name)
+}
+
+/**
+ * Re-derive the EC keypair from the photo+v2 secret cache. Repository
+ * already holds it as a private field; we'd normally lift it out, but
+ * PhotoTransferController takes a fresh KeyPair so it can decrypt the
+ * wrapped AES key on the incoming side without touching Repository
+ * internals.
+ */
+private fun keyPairFromPrefs(prefs: SecurePrefs, photoSecret: ByteArray): java.security.KeyPair {
+    val v2 = prefs.getString("v2_crypto_secret")
+    val secret = if (v2 != null) Crypto.b64decode(v2) else photoSecret
+    return Crypto.deriveEcKeyPair(secret)
 }
 
 // ── Lock + Settings overlays ─────────────────────────────────────────────────

@@ -88,7 +88,11 @@ class GroupRepository(
      * Returns the shared msgId on success, null if no members + pubkeys
      * could be resolved (group is effectively dead).
      */
-    suspend fun sendGroupMessage(groupId: String, text: String): String? {
+    suspend fun sendGroupMessage(
+        groupId: String,
+        text: String,
+        replyTo: String? = null,
+    ): String? {
         val members = groupMembers(groupId).filter { it != localId }
         if (members.isEmpty()) return null
         val msgId = "$localId-${System.currentTimeMillis()}-${(Math.random() * 1_000_000).toInt()}"
@@ -99,22 +103,20 @@ class GroupRepository(
             val enc = runCatching { Crypto.encryptMessageFor(text, pubkey) }.getOrNull()
                 ?: continue
             val docId = "$msgId-$memberId"
+            val payload = mutableMapOf<String, Any?>(
+                "from" to localId,
+                "to" to memberId,
+                "groupId" to groupId,
+                "encryptedKey" to enc.encryptedKey,
+                "iv" to enc.iv,
+                "cipherText" to enc.cipherText,
+                "messageAlgorithm" to enc.messageAlgorithm,
+                "keyAlgorithm" to enc.keyAlgorithm,
+                "createdAt" to System.currentTimeMillis(),
+            )
+            if (replyTo != null) payload["replyTo"] = replyTo
             runCatching {
-                firebase.firestoreSet(
-                    "messages/$docId",
-                    mapOf(
-                        "from" to localId,
-                        "to" to memberId,
-                        "groupId" to groupId,
-                        "encryptedKey" to enc.encryptedKey,
-                        "iv" to enc.iv,
-                        "cipherText" to enc.cipherText,
-                        "messageAlgorithm" to enc.messageAlgorithm,
-                        "keyAlgorithm" to enc.keyAlgorithm,
-                        "createdAt" to System.currentTimeMillis(),
-                    ),
-                    merge = false,
-                )
+                firebase.firestoreSet("messages/$docId", payload, merge = false)
                 sentCount++
             }
         }

@@ -68,27 +68,48 @@ class Repository(
     /**
      * Encrypt + write a message document. Caller supplies the plaintext
      * and recipient localId. Returns the generated messageId on success.
+     * Optional replyTo carries the msgId being replied to (Android v1.14.20
+     * wire format — the receiver renders a quoted preview above the bubble).
      */
-    suspend fun sendEncryptedMessage(peerId: String, text: String, peerPubkey: String): String {
+    suspend fun sendEncryptedMessage(
+        peerId: String,
+        text: String,
+        peerPubkey: String,
+        replyTo: String? = null,
+    ): String {
         val enc = Crypto.encryptMessageFor(text, peerPubkey)
         val ts = System.currentTimeMillis()
         val seq = nextSeq()
         val messageId = "$localId-$ts-$seq"
-        firebase.firestoreSet(
-            "messages/$messageId",
-            mapOf(
-                "from" to localId,
-                "to" to peerId,
-                "encryptedKey" to enc.encryptedKey,
-                "iv" to enc.iv,
-                "cipherText" to enc.cipherText,
-                "messageAlgorithm" to enc.messageAlgorithm,
-                "keyAlgorithm" to enc.keyAlgorithm,
-                "createdAt" to ts,
-            ),
-            merge = false,
+        val payload = mutableMapOf<String, Any?>(
+            "from" to localId,
+            "to" to peerId,
+            "encryptedKey" to enc.encryptedKey,
+            "iv" to enc.iv,
+            "cipherText" to enc.cipherText,
+            "messageAlgorithm" to enc.messageAlgorithm,
+            "keyAlgorithm" to enc.keyAlgorithm,
+            "createdAt" to ts,
         )
+        if (replyTo != null) payload["replyTo"] = replyTo
+        firebase.firestoreSet("messages/$messageId", payload, merge = false)
         return messageId
+    }
+
+    /** Poll receipts/{msgId} docs addressed to us → drives ✓/✓✓ UI. */
+    suspend fun pollReceipts(): List<Receipt> {
+        val docs = firebase.firestoreQuery(
+            "receipts",
+            equalityFilters = mapOf("from" to localId),
+            limit = 100,
+        )
+        val out = mutableListOf<Receipt>()
+        for ((id, fields) in docs) {
+            val delivered = (fields["delivered"] as? Boolean) ?: false
+            val read = (fields["read"] as? Boolean) ?: false
+            out.add(Receipt(id, delivered, read))
+        }
+        return out
     }
 
     /**
@@ -115,7 +136,8 @@ class Repository(
             }.getOrNull() ?: continue
             val ts = (fields["createdAt"] as? Long) ?: 0L
             val groupId = (fields["groupId"] as? String)?.takeIf { it.isNotBlank() }
-            out.add(InboundMessage(id, from, text, ts, groupId))
+            val replyTo = (fields["replyTo"] as? String)?.takeIf { it.isNotBlank() }
+            out.add(InboundMessage(id, from, text, ts, groupId, replyTo))
             // best-effort delete (matches MainActivity behaviour after receipt)
             runCatching { firebase.firestoreDelete("messages/$id") }
         }
@@ -150,5 +172,10 @@ class Repository(
         val ts: Long,
         /** Group fan-out doc had a non-blank groupId — route to group chat. */
         val groupId: String? = null,
+        /** msgId this message replies to, or null. */
+        val replyTo: String? = null,
     )
+
+    /** Per-msgId delivery state observed on the /receipts/ collection. */
+    data class Receipt(val msgId: String, val delivered: Boolean, val read: Boolean)
 }
