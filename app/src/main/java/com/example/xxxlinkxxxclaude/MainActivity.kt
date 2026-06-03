@@ -1161,16 +1161,23 @@ class MainActivity : AppCompatActivity() {
                 lines > prefs.getInt("$KEY_CHAT_READ_PREFIX$id", 0)
             }
 
-            // Last message preview (first 60 chars of last line, stripped of author prefix)
-            val lastMsg = run {
+            // Last message preview (first 60 chars of last line, stripped of author prefix).
+            // Also expose the status of the last message IF it's outgoing — so the
+            // contacts list shows ✓ / ✓✓ / ✓✓ (blue) without opening the chat.
+            val lastLine: String? = run {
                 val lines = splitLogLines(messageLogFor(id).toString())
-                if (lines.isEmpty()) "" else {
-                    val raw = lineText(lines.last())
-                    val ci = raw.indexOf(": ")
-                    val body = if (ci >= 0) raw.substring(ci + 2) else raw
-                    if (body.startsWith("[PHOTO:") && body.endsWith("]")) "📷 Photo"
-                    else body.take(60)
-                }
+                if (lines.isEmpty()) null else lines.last()
+            }
+            val lastMsg = if (lastLine == null) "" else {
+                val (_, body) = parseLineAuthorText(lastLine)
+                if (body.startsWith("[PHOTO:") && body.endsWith("]")) "📷 Photo"
+                else body.take(60)
+            }
+            val lastOutgoingStatus: MsgStatus? = lastLine?.let { line ->
+                val (author, _) = parseLineAuthorText(line)
+                if (author != "Me") return@let null
+                val msgId = lineMsgId(line) ?: return@let MsgStatus.SENT
+                getMessageStatus(msgId) ?: MsgStatus.SENT
             }
 
             // Name row: name + blue dot
@@ -1201,17 +1208,49 @@ class MainActivity : AppCompatActivity() {
                 addView(dotView)
             }
 
-            // Preview row (shown only if not empty)
-            val previewView = android.widget.TextView(this).apply {
-                text = lastMsg
-                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_muted))
-                textSize = 13f
-                setSingleLine(true)
+            // Preview row: optional ✓/✓✓ status indicator (if last msg is outgoing)
+            // + preview text. Hidden entirely if there's no last message.
+            val previewRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT
                 ).apply { topMargin = (2 * dp).toInt() }
                 visibility = if (lastMsg.isNotEmpty()) View.VISIBLE else View.GONE
+
+                if (lastOutgoingStatus != null) {
+                    val gray = 0xFF888888.toInt()
+                    val blue = 0xFF4FC3F7.toInt()
+                    val (mark, color) = when (lastOutgoingStatus) {
+                        MsgStatus.SENT      -> "✓"  to gray
+                        MsgStatus.DELIVERED -> "✓✓" to gray
+                        MsgStatus.READ      -> "✓✓" to blue
+                    }
+                    addView(android.widget.TextView(this@MainActivity).apply {
+                        text = mark
+                        textSize = 12f
+                        setTextColor(color)
+                        includeFontPadding = false
+                        letterSpacing = -0.18f
+                        setTypeface(typeface, android.graphics.Typeface.BOLD)
+                        layoutParams = LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.WRAP_CONTENT,
+                            LinearLayout.LayoutParams.WRAP_CONTENT
+                        ).apply { rightMargin = (6 * dp).toInt() }
+                    })
+                }
+                addView(android.widget.TextView(this@MainActivity).apply {
+                    text = lastMsg
+                    setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_muted))
+                    textSize = 13f
+                    setSingleLine(true)
+                    layoutParams = LinearLayout.LayoutParams(
+                        0,
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        1f
+                    )
+                })
             }
 
             // Card
@@ -1237,7 +1276,7 @@ class MainActivity : AppCompatActivity() {
                     }
                 )
                 addView(topRow)
-                addView(previewView)
+                addView(previewRow)
                 setOnClickListener { openChat(id) }
                 setOnLongClickListener { showContactContextMenu(id); true }
             }
@@ -2306,7 +2345,14 @@ class MainActivity : AppCompatActivity() {
 
     /** Rebuild chat bubbles — debounced 150ms to batch rapid status-tick updates. */
     private fun refreshChatDisplay(chatId: String) {
-        if (binding.chatScreen.visibility != View.VISIBLE || chatId != remoteId) return
+        // If chat is not open we still want to refresh the contacts list so the
+        // ✓/✓✓ indicator next to the last message preview updates live.
+        if (binding.chatScreen.visibility != View.VISIBLE || chatId != remoteId) {
+            if (binding.contactListScreen.visibility == View.VISIBLE) {
+                runOnUiThread { renderContacts() }
+            }
+            return
+        }
         pendingRefreshJob?.cancel()
         pendingRefreshJob = ioScope.launch {
             delay(150)
