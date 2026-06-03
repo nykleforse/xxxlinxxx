@@ -217,7 +217,10 @@ class MainActivity : AppCompatActivity() {
 
     private val photoPickerLauncher = registerForActivityResult(
         ActivityResultContracts.GetContent()
-    ) { uri -> uri?.let { ioScope.launch { prepareAndSendPhoto(it) } } }
+    ) { uri ->
+        Log.d(TAG, "XLINK_PHOTO picker returned uri=$uri")
+        uri?.let { ioScope.launch { prepareAndSendPhoto(it) } }
+    }
 
     private val qrScanLauncher = registerForActivityResult(ScanContract()) { result ->
         val content = result.contents ?: return@registerForActivityResult
@@ -956,9 +959,16 @@ class MainActivity : AppCompatActivity() {
                 renderContacts()
             }
         })
-        // Group chat title row → open group info / management.
+        // Chat title row:
+        // - group: open group info / management.
+        // - 1:1: toggle peer ID visibility (so user can tap the name to read
+        //   the underlying localId for QR sharing / verification).
         binding.chatTitle.setOnClickListener {
-            if (isGroup(remoteId)) showGroupInfo(remoteId)
+            if (isGroup(remoteId)) {
+                showGroupInfo(remoteId)
+            } else if (remoteId.isNotBlank()) {
+                togglePeerIdVisibility()
+            }
         }
 
         binding.btnCall.setOnClickListener {
@@ -993,6 +1003,7 @@ class MainActivity : AppCompatActivity() {
         binding.btnCancelReply.setOnClickListener { cancelReply() }
         binding.btnAttachPhoto.setOnClickListener {
             val targetId = selectedContactId()
+            Log.d(TAG, "XLINK_PHOTO btnAttachPhoto tapped targetId='$targetId' localId='$localId' bound=$localIdBound")
             if (targetId.isBlank()) {
                 Toast.makeText(this, "Open a chat first", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
@@ -1250,6 +1261,32 @@ class MainActivity : AppCompatActivity() {
      * Fetches peer's pubkey (cached) and shows the fingerprint emoji row in the
      * chat header. Hidden until the lookup resolves.
      */
+    /**
+     * Reveal the peer's localId in the chat header for 5 seconds (then revert to
+     * the fingerprint row), and copy it to the clipboard so the user can paste
+     * it elsewhere. Triggered by tapping the contact name in a 1:1 chat.
+     */
+    private fun togglePeerIdVisibility() {
+        val id = remoteId.takeIf { it.isNotBlank() } ?: return
+        val previous = binding.chatPeerId.text?.toString().orEmpty()
+        val previouslyVisible = binding.chatPeerId.visibility == View.VISIBLE
+        binding.chatPeerId.text = id
+        binding.chatPeerId.visibility = View.VISIBLE
+        runCatching {
+            val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            cm.setPrimaryClip(ClipData.newPlainText("contact id", id))
+        }
+        Toast.makeText(this, "ID скопирован", Toast.LENGTH_SHORT).show()
+        binding.chatPeerId.postDelayed({
+            // Don't stomp on a newer chat or a group switch.
+            if (remoteId == id && !isGroup(id)) {
+                binding.chatPeerId.text = previous
+                binding.chatPeerId.visibility =
+                    if (previouslyVisible && previous.isNotBlank()) View.VISIBLE else View.GONE
+            }
+        }, 5_000)
+    }
+
     private fun loadPeerFingerprint(id: String) {
         binding.chatPeerId.visibility = View.GONE
         ioScope.launch {
@@ -4702,7 +4739,9 @@ class MainActivity : AppCompatActivity() {
     // ─── Photo Transfer ───────────────────────────────────────────────────────
 
     private suspend fun prepareAndSendPhoto(uri: android.net.Uri) {
+        Log.d(TAG, "XLINK_PHOTO prepareAndSendPhoto start uri=$uri remoteId='$remoteId'")
         val chatId = remoteId.takeIf { it.isNotBlank() } ?: run {
+            Log.w(TAG, "XLINK_PHOTO abort: no active chat")
             runOnUiThread { Toast.makeText(this, "No active chat", Toast.LENGTH_SHORT).show() }
             return
         }
@@ -4710,9 +4749,11 @@ class MainActivity : AppCompatActivity() {
 
         val original = contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) }
         if (original == null) {
+            Log.w(TAG, "XLINK_PHOTO abort: BitmapFactory returned null for uri=$uri")
             runOnUiThread { Toast.makeText(this, "Cannot read or decode photo", Toast.LENGTH_SHORT).show() }
             return
         }
+        Log.d(TAG, "XLINK_PHOTO decoded original=${original.width}x${original.height}")
         val maxSide = 1200
         val scaled = if (original.width > maxSide || original.height > maxSide) {
             val ratio = minOf(maxSide.toFloat() / original.width, maxSide.toFloat() / original.height)
@@ -4731,9 +4772,11 @@ class MainActivity : AppCompatActivity() {
         }.getOrNull()
 
         if (recipientKeyB64.isNullOrBlank()) {
+            Log.w(TAG, "XLINK_PHOTO abort: no messagePublicKey for chatId=$chatId")
             runOnUiThread { Toast.makeText(this, "Cannot get contact's encryption key", Toast.LENGTH_SHORT).show() }
             return
         }
+        Log.d(TAG, "XLINK_PHOTO recipient key fetched (${recipientKeyB64.length} chars)")
 
         val aesKey = javax.crypto.KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
         val iv = ByteArray(12).also { java.security.SecureRandom().nextBytes(it) }
@@ -4796,6 +4839,7 @@ class MainActivity : AppCompatActivity() {
                     if (desc == null) return
                     photoTransferPc?.setLocalDescription(object : SdpObserverAdapter() {
                         override fun onSetSuccess() {
+                            Log.d(TAG, "XLINK_PHOTO writing transfer doc tid=$transferId offerLen=${desc.description.length}")
                             firestore.collection("transfers").document(transferId).set(
                                 mapOf(
                                     "transferId" to transferId,
@@ -4807,10 +4851,11 @@ class MainActivity : AppCompatActivity() {
                                 )
                             )
                                 .addOnSuccessListener {
+                                    Log.d(TAG, "XLINK_PHOTO transfer doc write OK tid=$transferId")
                                     listenPhotoTransferAnswer(transferId, chatId, chunks, encKeyB64, ivB64)
                                 }
                                 .addOnFailureListener { e ->
-                                    Log.w(TAG, "photo transfer offer write failed: ${e.message}")
+                                    Log.w(TAG, "XLINK_PHOTO transfer offer write failed: ${e.message}")
                                     runOnUiThread {
                                         Toast.makeText(this@MainActivity, "Photo transfer setup failed", Toast.LENGTH_SHORT).show()
                                     }
