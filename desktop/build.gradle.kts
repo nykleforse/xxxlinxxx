@@ -11,7 +11,14 @@ version = "1.15.8"
 // Repositories live in settings.gradle.kts under FAIL_ON_PROJECT_REPOS.
 
 kotlin {
-    jvmToolchain(17)
+    // Pin to a Temurin/Adoptium JDK so Foojay auto-downloads a build that
+    // ships jpackage — JBR (the JDK bundled with Android Studio) omits
+    // jpackage which blocks the Compose Desktop createDistributable /
+    // packageMsi / packageExe tasks.
+    jvmToolchain {
+        languageVersion.set(JavaLanguageVersion.of(17))
+        vendor.set(JvmVendorSpec.ADOPTIUM)
+    }
 }
 
 dependencies {
@@ -33,9 +40,17 @@ dependencies {
     implementation("dev.onvoid.webrtc:webrtc-java:0.10.0:macos-x86_64")
 }
 
+// Point the Compose Desktop checkRuntime / jpackage tasks at the Adoptium
+// JDK that the kotlin toolchain auto-downloaded (JBR omits jpackage).
+val adoptiumLauncher = javaToolchains.launcherFor {
+    languageVersion.set(JavaLanguageVersion.of(17))
+    vendor.set(JvmVendorSpec.ADOPTIUM)
+}
+
 compose.desktop {
     application {
         mainClass = "com.example.xxxlinkxxx.desktop.MainKt"
+        javaHome = adoptiumLauncher.get().metadata.installationPath.asFile.absolutePath
 
         nativeDistributions {
             targetFormats(TargetFormat.Msi, TargetFormat.Exe)

@@ -45,6 +45,8 @@ import com.example.xxxlinkxxx.desktop.call.VoiceCallController
 import com.example.xxxlinkxxx.desktop.crypto.Crypto
 import com.example.xxxlinkxxx.desktop.net.FirebaseClient
 import com.example.xxxlinkxxx.desktop.net.Repository
+import com.example.xxxlinkxxx.desktop.security.BackupCodec
+import com.example.xxxlinkxxx.desktop.security.PinLock
 import com.example.xxxlinkxxx.desktop.storage.SecurePrefs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -79,7 +81,11 @@ private const val FB_PROJECT_ID = "xxxlinkxxx-81cbf"
 
 private sealed interface AppScreen {
     object Login : AppScreen
-    data class Authenticated(val repo: Repository, val prefs: SecurePrefs) : AppScreen
+    data class Authenticated(
+        val repo: Repository,
+        val prefs: SecurePrefs,
+        val photoSecret: ByteArray,
+    ) : AppScreen
 }
 
 private sealed interface AuthedSub {
@@ -98,13 +104,14 @@ fun App() {
             AppScreen.Login -> LoginScreen(
                 status = status,
                 onStatus = { status = it },
-                onAuthenticated = { repo, prefs ->
-                    screen = AppScreen.Authenticated(repo, prefs)
+                onAuthenticated = { repo, prefs, photoSecret ->
+                    screen = AppScreen.Authenticated(repo, prefs, photoSecret)
                 }
             )
             is AppScreen.Authenticated -> AuthedRoot(
                 repo = s.repo,
                 prefs = s.prefs,
+                photoSecret = s.photoSecret,
                 onLogout = {
                     screen = AppScreen.Login
                     status = "Logged out"
@@ -120,7 +127,7 @@ fun App() {
 private fun LoginScreen(
     status: String,
     onStatus: (String) -> Unit,
-    onAuthenticated: (Repository, SecurePrefs) -> Unit,
+    onAuthenticated: (Repository, SecurePrefs, ByteArray) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     var photoFile by remember { mutableStateOf<File?>(null) }
@@ -171,9 +178,9 @@ private fun LoginScreen(
                 scope.launch {
                     runCatching {
                         doLogin(photo, password, onStatus)
-                    }.onSuccess { (repo, prefs) ->
+                    }.onSuccess { triple ->
                         busy = false
-                        onAuthenticated(repo, prefs)
+                        onAuthenticated(triple.first, triple.second, triple.third)
                     }.onFailure { e ->
                         busy = false
                         onStatus("Login failed: ${e.message}")
@@ -191,7 +198,7 @@ private suspend fun doLogin(
     photo: File,
     password: String,
     onStatus: (String) -> Unit,
-): Pair<Repository, SecurePrefs> = withContext(Dispatchers.IO) {
+): Triple<Repository, SecurePrefs, ByteArray> = withContext(Dispatchers.IO) {
     onStatus("Reading photo...")
     val photoBytes = photo.readBytes()
 
@@ -222,7 +229,7 @@ private suspend fun doLogin(
     repo.publishPublicMessageKey()
 
     onStatus("Ready as $localId")
-    repo to prefs
+    Triple(repo, prefs, photoSecret)
 }
 
 // ── Authenticated root: contacts list / chat / add-contact ───────────────────
@@ -231,8 +238,14 @@ private suspend fun doLogin(
 private fun AuthedRoot(
     repo: Repository,
     prefs: SecurePrefs,
+    photoSecret: ByteArray,
     onLogout: () -> Unit,
 ) {
+    var locked by remember { mutableStateOf(PinLock.isEnabled(prefs)) }
+    var lockError by remember { mutableStateOf("") }
+    var pinAttempt by remember { mutableStateOf("") }
+    var settingsOpen by remember { mutableStateOf(false) }
+    var settingsMsg by remember { mutableStateOf("") }
     var sub: AuthedSub by remember { mutableStateOf<AuthedSub>(AuthedSub.ContactList) }
     val contacts = remember {
         mutableStateListOf<String>().also { it.addAll(prefs.getStringSet("contact_ids")) }
@@ -309,6 +322,7 @@ private fun AuthedRoot(
             onAdd = { sub = AuthedSub.AddContact },
             onPick = { sub = AuthedSub.Chat(it) },
             onLogout = onLogout,
+            onSettings = { settingsOpen = true },
         )
         AuthedSub.AddContact -> AddContactScreen(
             onAdd = { id ->
@@ -338,6 +352,64 @@ private fun AuthedRoot(
             onCall = {
                 runCatching { callController.startOutgoing(s.peerId) }
                     .onFailure { /* TODO surface toast in UI */ }
+            },
+        )
+    }
+
+    if (settingsOpen) {
+        SettingsOverlay(
+            pinEnabled = PinLock.isEnabled(prefs),
+            statusMessage = settingsMsg,
+            onSetPin = { newPin ->
+                runCatching { PinLock.set(prefs, newPin) }
+                    .onSuccess { settingsMsg = "PIN set" }
+                    .onFailure { settingsMsg = "PIN error: ${it.message}" }
+            },
+            onDisablePin = {
+                PinLock.disable(prefs)
+                settingsMsg = "PIN disabled"
+            },
+            onExportBackup = {
+                val target = saveBackupDialog() ?: return@SettingsOverlay
+                runCatching { BackupCodec.export(prefs, photoSecret, target) }
+                    .onSuccess { settingsMsg = "Backup written: ${target.name}" }
+                    .onFailure { settingsMsg = "Backup error: ${it.message}" }
+            },
+            onImportBackup = {
+                val src = openBackupDialog() ?: return@SettingsOverlay
+                runCatching { BackupCodec.restore(prefs, photoSecret, src) }
+                    .onSuccess { r ->
+                        contacts.clear()
+                        contacts.addAll(prefs.getStringSet("contact_ids"))
+                        settingsMsg = "Restored ${r.contactCount} contacts, ${r.chatCount} chats"
+                    }
+                    .onFailure { settingsMsg = "Restore error: ${it.message}" }
+            },
+            onClose = {
+                settingsOpen = false
+                settingsMsg = ""
+            },
+        )
+    }
+
+    if (locked) {
+        LockOverlay(
+            pin = pinAttempt,
+            onPinChange = { pinAttempt = it.filter { c -> c.isDigit() }.take(16) },
+            error = lockError,
+            onUnlock = {
+                val err = PinLock.verify(prefs, pinAttempt)
+                if (err == null) {
+                    locked = false
+                    lockError = ""
+                    pinAttempt = ""
+                } else {
+                    lockError = err
+                    pinAttempt = ""
+                    if (err.contains("wiped", ignoreCase = true)) {
+                        onLogout()
+                    }
+                }
             },
         )
     }
@@ -380,6 +452,7 @@ private fun ContactListScreen(
     onAdd: () -> Unit,
     onPick: (String) -> Unit,
     onLogout: () -> Unit,
+    onSettings: () -> Unit,
 ) {
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -390,6 +463,8 @@ private fun ContactListScreen(
         Spacer(Modifier.height(8.dp))
         Row {
             DarkButton(label = "+ Add", onClick = onAdd)
+            Spacer(Modifier.width(8.dp))
+            DarkButton(label = "Settings", onClick = onSettings)
             Spacer(Modifier.width(8.dp))
             DarkButton(label = "Log out", onClick = onLogout)
         }
@@ -592,4 +667,138 @@ private fun openPhotoDialog(): File? {
     val name = fd.file ?: return null
     val dir = fd.directory ?: return null
     return File(dir, name)
+}
+
+private fun saveBackupDialog(): File? {
+    val fd = FileDialog(null as Frame?, "Save backup", FileDialog.SAVE).apply {
+        file = "xlink_backup_${System.currentTimeMillis()}.xlinkbak"
+        isVisible = true
+    }
+    val name = fd.file ?: return null
+    val dir = fd.directory ?: return null
+    return File(dir, if (name.endsWith(".xlinkbak", true)) name else "$name.xlinkbak")
+}
+
+private fun openBackupDialog(): File? {
+    val fd = FileDialog(null as Frame?, "Open backup", FileDialog.LOAD).apply {
+        setFilenameFilter { _, name -> name.endsWith(".xlinkbak", true) }
+        isVisible = true
+    }
+    val name = fd.file ?: return null
+    val dir = fd.directory ?: return null
+    return File(dir, name)
+}
+
+// ── Lock + Settings overlays ─────────────────────────────────────────────────
+
+@Composable
+private fun LockOverlay(
+    pin: String,
+    onPinChange: (String) -> Unit,
+    error: String,
+    onUnlock: () -> Unit,
+) {
+    Box(
+        Modifier.fillMaxSize().background(Color(0xEE000000)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            Modifier
+                .width(360.dp)
+                .background(Surface, RoundedCornerShape(10.dp))
+                .border(1.dp, Line, RoundedCornerShape(10.dp))
+                .padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text("Locked", color = TextPrimary, style = Mono.copy(fontSize = 16.sp))
+            Spacer(Modifier.height(16.dp))
+            FieldBox(width = 280.dp) {
+                TextInputRaw(
+                    value = pin,
+                    onChange = onPinChange,
+                    placeholder = "PIN",
+                    mask = true,
+                )
+            }
+            Spacer(Modifier.height(12.dp))
+            DarkButton(label = "Unlock", onClick = onUnlock, enabled = pin.length >= 4)
+            if (error.isNotEmpty()) {
+                Spacer(Modifier.height(12.dp))
+                Text(error, color = Color(0xFFFF4040), style = Mono.copy(fontSize = 11.sp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingsOverlay(
+    pinEnabled: Boolean,
+    statusMessage: String,
+    onSetPin: (String) -> Unit,
+    onDisablePin: () -> Unit,
+    onExportBackup: () -> Unit,
+    onImportBackup: () -> Unit,
+    onClose: () -> Unit,
+) {
+    var newPin by remember { mutableStateOf("") }
+    Box(
+        Modifier.fillMaxSize().background(Color(0xEE000000)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            Modifier
+                .width(420.dp)
+                .background(Surface, RoundedCornerShape(10.dp))
+                .border(1.dp, Line, RoundedCornerShape(10.dp))
+                .padding(24.dp),
+        ) {
+            Text("Settings", color = TextPrimary, style = Mono.copy(fontSize = 16.sp))
+            Spacer(Modifier.height(16.dp))
+            Text("App lock", color = TextSecondary, style = Mono.copy(fontSize = 12.sp))
+            Spacer(Modifier.height(6.dp))
+            FieldBox(width = 320.dp) {
+                TextInputRaw(
+                    value = newPin,
+                    onChange = { newPin = it.filter { c -> c.isDigit() }.take(16) },
+                    placeholder = "New PIN (4-16 digits)",
+                    mask = true,
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            Row {
+                DarkButton(
+                    label = if (pinEnabled) "Change PIN" else "Set PIN",
+                    onClick = {
+                        if (newPin.length >= 4) {
+                            onSetPin(newPin)
+                            newPin = ""
+                        }
+                    },
+                    enabled = newPin.length >= 4,
+                )
+                if (pinEnabled) {
+                    Spacer(Modifier.width(8.dp))
+                    DarkButton(label = "Disable PIN", onClick = onDisablePin)
+                }
+            }
+            Spacer(Modifier.height(20.dp))
+            Box(Modifier.height(1.dp).fillMaxWidth().background(Line))
+            Spacer(Modifier.height(16.dp))
+            Text("Backup", color = TextSecondary, style = Mono.copy(fontSize = 12.sp))
+            Spacer(Modifier.height(8.dp))
+            Row {
+                DarkButton(label = "Export...", onClick = onExportBackup)
+                Spacer(Modifier.width(8.dp))
+                DarkButton(label = "Import...", onClick = onImportBackup)
+            }
+            if (statusMessage.isNotEmpty()) {
+                Spacer(Modifier.height(12.dp))
+                Text(statusMessage, color = TextSecondary, style = Mono.copy(fontSize = 11.sp))
+            }
+            Spacer(Modifier.height(16.dp))
+            Box(Modifier.height(1.dp).fillMaxWidth().background(Line))
+            Spacer(Modifier.height(12.dp))
+            DarkButton(label = "Close", onClick = onClose)
+        }
+    }
 }
