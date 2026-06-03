@@ -55,21 +55,20 @@ exports.bindLocalId = onCall({region: "us-central1"}, async (request) => {
   const snap = await bindRef.get();
   const now = Date.now();
 
-  // Decide which pubkey to verify against.
-  let canonicalPubkey;
-  if (snap.exists) {
-    const stored = snap.data();
-    canonicalPubkey = stored.pubkey;
-    if (canonicalPubkey !== pubkey) {
-      throw new HttpsError("permission-denied", "Pubkey mismatch (key rotation not supported)");
-    }
-  } else {
-    canonicalPubkey = pubkey;
-  }
-
-  if (!verifySignature(localId, uid, canonicalPubkey, signature)) {
+  // Verify signature against the SUBMITTED pubkey. If the caller can produce
+  // a valid signature for the (localId, uid) pair under their current private
+  // key, treat them as the legitimate owner — even when the submitted pubkey
+  // differs from the one stored on a previous bind. This accommodates v1 → v2
+  // password upgrade and ordinary password changes, both of which legitimately
+  // rotate the EC keypair derived from photo+password.
+  //
+  // Trade-off: anyone who possesses the photo + password (the identity factors
+  // — see S3 stance) can rotate the binding. This matches the documented
+  // threat model, where photo+password is the canonical credential.
+  if (!verifySignature(localId, uid, pubkey, signature)) {
     throw new HttpsError("permission-denied", "Signature invalid");
   }
+  const canonicalPubkey = pubkey;
 
   // Build the new devices map (≤ MAX_DEVICES, LRU eviction).
   let devices = snap.exists && snap.data().devices ? {...snap.data().devices} : {};

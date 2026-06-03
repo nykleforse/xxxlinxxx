@@ -86,6 +86,8 @@ class XxxFirebaseMessagingService : FirebaseMessagingService() {
     private fun showMessageNotification(data: Map<String, String>) {
         if (isAppInForeground()) return
         val senderId = data["senderId"].orEmpty()
+        val groupId = data["groupId"].orEmpty()
+        val openChatId = groupId.ifBlank { senderId }
         val senderName = contactName(senderId).ifBlank { "New message" }
         val body = data["body"]?.takeIf { it.isNotBlank() } ?: "Encrypted message"
         val count = incrementUnreadCount()
@@ -101,7 +103,7 @@ class XxxFirebaseMessagingService : FirebaseMessagingService() {
             .setSound(notificationSound(R.raw.incoming_message))
             .setBadgeIconType(NotificationCompat.BADGE_ICON_SMALL)
             .setNumber(count)
-            .setContentIntent(contentIntent())
+            .setContentIntent(contentIntent(openChatId))
             .setAutoCancel(true)
             .build()
         notificationManager().notify((NOTIFICATION_MESSAGE_ID_BASE + senderId.hashCode()).absoluteValue, notification)
@@ -167,13 +169,18 @@ class XxxFirebaseMessagingService : FirebaseMessagingService() {
     private fun notificationSound(resId: Int): Uri =
         Uri.parse("android.resource://$packageName/$resId")
 
-    private fun contentIntent(): PendingIntent {
+    private fun contentIntent(openChatId: String? = null): PendingIntent {
         val intent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            if (!openChatId.isNullOrBlank()) putExtra("openChatId", openChatId)
         }
         val flags = PendingIntent.FLAG_UPDATE_CURRENT or
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
-        return PendingIntent.getActivity(this, 0, intent, flags)
+        // Use openChatId as requestCode discriminator so multiple per-sender
+        // PendingIntents stay independent (otherwise FLAG_UPDATE_CURRENT
+        // overrides all to the latest sender).
+        val requestCode = openChatId?.hashCode() ?: 0
+        return PendingIntent.getActivity(this, requestCode, intent, flags)
     }
 
     private fun contactName(id: String): String {

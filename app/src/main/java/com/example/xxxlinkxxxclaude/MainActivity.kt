@@ -410,6 +410,14 @@ class MainActivity : AppCompatActivity() {
         setIntent(intent)
         if (intent.action == CallForegroundService.ACTION_END_CALL) {
             disconnectCall()
+            return
+        }
+        // Notification tap → open the chat with the sender (or group). For new
+        // senders not yet in saved contacts, rememberContact() auto-adds them
+        // so the card materialises in the chat list.
+        intent.getStringExtra("openChatId")?.takeIf { it.isNotBlank() }?.let { id ->
+            if (!isGroup(id) && id !in savedContactIds()) rememberContact(id)
+            openChat(id)
         }
     }
 
@@ -587,6 +595,13 @@ class MainActivity : AppCompatActivity() {
         startMessagePolling()
         resumeAllGroupListeners()
         BackupWorker.schedule(this)
+        // Notification cold-launch: if the user tapped a chat notification
+        // before MainActivity existed, the launching Intent carries openChatId.
+        intent?.getStringExtra("openChatId")?.takeIf { it.isNotBlank() }?.let { id ->
+            if (!isGroup(id) && id !in savedContactIds()) rememberContact(id)
+            openChat(id)
+            intent.removeExtra("openChatId")
+        }
         // Silent background update check — shows dialog only if update found
         ioScope.launch {
             kotlinx.coroutines.delay(8_000)
