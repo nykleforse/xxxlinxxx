@@ -3659,7 +3659,16 @@ class MainActivity : AppCompatActivity() {
                                     "createdAt" to System.currentTimeMillis()
                                 )
                             )
-                            listenPhotoTransferAnswer(transferId, chatId, chunks, encKeyB64, ivB64)
+                                .addOnSuccessListener {
+                                    listenPhotoTransferAnswer(transferId, chatId, chunks, encKeyB64, ivB64)
+                                }
+                                .addOnFailureListener { e ->
+                                    Log.w(TAG, "photo transfer offer write failed: ${e.message}")
+                                    runOnUiThread {
+                                        Toast.makeText(this@MainActivity, "Photo transfer setup failed", Toast.LENGTH_SHORT).show()
+                                    }
+                                    cleanupPhotoTransfer()
+                                }
                         }
                         override fun onSetFailure(error: String?) {
                             runOnUiThread { Toast.makeText(this@MainActivity, "Photo transfer setup failed: $error", Toast.LENGTH_SHORT).show() }
@@ -3699,6 +3708,7 @@ class MainActivity : AppCompatActivity() {
                         "sdpMLineIndex" to cand.sdpMLineIndex,
                         "candidate" to cand.sdp
                     ))
+                    ?.addOnFailureListener { e -> Log.w(TAG, "photo candidate write failed: ${e.message}") }
             }
             override fun onConnectionChange(state: PeerConnection.PeerConnectionState?) {
                 if (state == PeerConnection.PeerConnectionState.FAILED ||
@@ -3738,7 +3748,11 @@ class MainActivity : AppCompatActivity() {
     ) {
         val firestore = db ?: return
         val listener = firestore.collection("transfers").document(transferId)
-            .addSnapshotListener { snap, _ ->
+            .addSnapshotListener { snap, error ->
+                if (error != null) {
+                    Log.w(TAG, "photo transfer answer listener failed: ${error.message}")
+                    return@addSnapshotListener
+                }
                 val state = snap?.getString("state") ?: return@addSnapshotListener
                 if (state != "accepted") return@addSnapshotListener
                 val answer = snap.getString("answer") ?: return@addSnapshotListener
@@ -3764,7 +3778,11 @@ class MainActivity : AppCompatActivity() {
         val excludeSender = localId
         val listener = firestore.collection("transfers").document(transferId)
             .collection("candidates")
-            .addSnapshotListener { snap, _ ->
+            .addSnapshotListener { snap, error ->
+                if (error != null) {
+                    Log.w(TAG, "photo candidates listener failed: ${error.message}")
+                    return@addSnapshotListener
+                }
                 snap?.documentChanges?.forEach { change ->
                     if (change.type == com.google.firebase.firestore.DocumentChange.Type.ADDED) {
                         val doc = change.document
@@ -3848,6 +3866,7 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 db?.collection("transfers")?.document(transferId)?.update("state", "done")
+                    ?.addOnFailureListener { e -> Log.w(TAG, "photo transfer done update failed: ${e.message}") }
                 cleanupPhotoTransfer()
 
             } catch (e: Exception) {
@@ -3857,9 +3876,25 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun sendPhotoPacket(dc: DataChannel, packet: String) {
+    private suspend fun sendPhotoPacket(dc: DataChannel, packet: String) {
+        var waitedMs = 0L
+        while (dc.bufferedAmount() > PHOTO_CHANNEL_MAX_BUFFERED_AMOUNT_BYTES) {
+            if (dc.state() != DataChannel.State.OPEN) {
+                error("photo channel closed")
+            }
+            if (waitedMs >= PHOTO_CHANNEL_BUFFER_TIMEOUT_MS) {
+                error("photo channel buffer timeout")
+            }
+            delay(PHOTO_CHANNEL_BUFFER_POLL_MS)
+            waitedMs += PHOTO_CHANNEL_BUFFER_POLL_MS
+        }
+        if (dc.state() != DataChannel.State.OPEN) {
+            error("photo channel closed")
+        }
         val bytes = packet.toByteArray(Charsets.UTF_8)
-        dc.send(DataChannel.Buffer(java.nio.ByteBuffer.wrap(bytes), false))
+        if (!dc.send(DataChannel.Buffer(java.nio.ByteBuffer.wrap(bytes), false))) {
+            error("photo channel send failed")
+        }
     }
 
     private fun listenIncomingPhotoTransfers() {
@@ -3869,7 +3904,10 @@ class MainActivity : AppCompatActivity() {
             .whereEqualTo("receiverId", localId)
             .whereEqualTo("state", "pending")
             .addSnapshotListener { snap, error ->
-                if (error != null) return@addSnapshotListener
+                if (error != null) {
+                    Log.w(TAG, "incoming photo transfer listener failed: ${error.message}")
+                    return@addSnapshotListener
+                }
                 snap?.documentChanges?.forEach { change ->
                     if (change.type == com.google.firebase.firestore.DocumentChange.Type.ADDED) {
                         val doc = change.document
@@ -3905,15 +3943,26 @@ class MainActivity : AppCompatActivity() {
                                     firestore.collection("transfers").document(docId).update(
                                         mapOf("answer" to desc.description, "state" to "accepted")
                                     )
-                                    listenPhotoTransferCandidates(docId)
+                                        .addOnSuccessListener { listenPhotoTransferCandidates(docId) }
+                                        .addOnFailureListener { e ->
+                                            Log.w(TAG, "photo transfer answer write failed: ${e.message}")
+                                            cleanupPhotoTransfer()
+                                        }
                                 }
-                                override fun onSetFailure(error: String?) {}
+                                override fun onSetFailure(error: String?) {
+                                    Log.w(TAG, "photo answer local description failed: $error")
+                                    cleanupPhotoTransfer()
+                                }
                             }, desc)
                         }
-                        override fun onCreateFailure(error: String?) {}
+                        override fun onCreateFailure(error: String?) {
+                            Log.w(TAG, "photo answer create failed: $error")
+                            cleanupPhotoTransfer()
+                        }
                     }, MediaConstraints())
                 }
                 override fun onSetFailure(error: String?) {
+                    Log.w(TAG, "photo offer remote description failed: $error")
                     cleanupPhotoTransfer()
                 }
             }, SessionDescription(SessionDescription.Type.OFFER, offer))
@@ -3944,6 +3993,7 @@ class MainActivity : AppCompatActivity() {
                         "sdpMLineIndex" to cand.sdpMLineIndex,
                         "candidate" to cand.sdp
                     ))
+                    ?.addOnFailureListener { e -> Log.w(TAG, "photo receiver candidate write failed: ${e.message}") }
             }
             override fun onConnectionChange(state: PeerConnection.PeerConnectionState?) {
                 if (state == PeerConnection.PeerConnectionState.FAILED ||
@@ -4140,6 +4190,7 @@ class MainActivity : AppCompatActivity() {
             outgoingPhotoTransferId = null
             outgoingPhotoChatId = null
             photoSendInProgress = false
+            resetAssembly()
         }
     }
 
@@ -4851,6 +4902,9 @@ class MainActivity : AppCompatActivity() {
         private const val NOTIFICATION_MESSAGES_CHANNEL_ID = "xxxlink_messages_v3"
         private const val NOTIFICATION_CALL_ID = 5001
         private const val NOTIFICATION_MESSAGE_ID_BASE = 6000
+        private const val PHOTO_CHANNEL_MAX_BUFFERED_AMOUNT_BYTES = 256L * 1024L
+        private const val PHOTO_CHANNEL_BUFFER_POLL_MS = 25L
+        private const val PHOTO_CHANNEL_BUFFER_TIMEOUT_MS = 30_000L
         private fun sharedCodecBytesPerFrame(codec2Mode: Int?): Int =
             when (codec2Mode) {
                 0 -> 8
