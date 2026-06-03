@@ -149,6 +149,10 @@ class MainActivity : AppCompatActivity() {
     private var coreStarted = false
     private var currentVoiceMode = VoiceMode.COMFY
 
+    // ── Reply-to state ────────────────────────────────────────────────────────
+    /** msgId of the message currently being replied to, or null. */
+    private var replyingToMsgId: String? = null
+
     // ── App lock ──────────────────────────────────────────────────────────────
     private var appUnlocked = false
 
@@ -904,6 +908,10 @@ class MainActivity : AppCompatActivity() {
                 }
             )
         }
+        binding.btnNewGroup.setOnClickListener {
+            binding.drawerLayout.closeDrawer(GravityCompat.START)
+            showNewGroupDialog()
+        }
 
         binding.btnCall.setOnClickListener {
             call()
@@ -934,6 +942,7 @@ class MainActivity : AppCompatActivity() {
             updateDebugStatus(if (speakerEnabled) "speaker on" else "phone audio")
         }
         binding.btnSend.setOnClickListener { sendMessage() }
+        binding.btnCancelReply.setOnClickListener { cancelReply() }
         binding.btnAttachPhoto.setOnClickListener {
             val targetId = selectedContactId()
             if (targetId.isBlank()) {
@@ -1451,11 +1460,11 @@ class MainActivity : AppCompatActivity() {
     private fun renderContacts() {
         updateUnreadBadge()
         binding.contactsList.removeAllViews()
-        val contacts = savedContactIds()
+        // Merge contacts + groups into one list, sort by last activity.
+        val contacts = (savedContactIds() + savedGroupIds())
             .sortedWith(
-                // Most recent activity first; alphabetical fallback for empty chats.
                 compareByDescending<String> { lastChatActivity(it) }
-                    .thenBy { contactName(it).lowercase(Locale.US) }
+                    .thenBy { (if (isGroup(it)) groupName(it) else contactName(it)).lowercase(Locale.US) }
                     .thenBy { it }
             )
         if (contacts.isEmpty()) {
@@ -1499,9 +1508,10 @@ class MainActivity : AppCompatActivity() {
                 getMessageStatus(msgId) ?: MsgStatus.SENT
             }
 
-            // Name row: name + blue dot
+            // Name row: name + blue dot. Prefix group cards with 👥.
+            val displayName = if (isGroup(id)) "👥 ${groupName(id)}" else contactName(id)
             val nameView = android.widget.TextView(this).apply {
-                text = contactName(id)
+                text = displayName
                 setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_primary))
                 textSize = 16f
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
@@ -1639,12 +1649,21 @@ class MainActivity : AppCompatActivity() {
 
     private fun openChat(id: String) {
         remoteId = id
-        binding.chatTitle.text = contactName(id)
-        updateAddContactBanner(id)
-        // Async fetch + display peer pubkey visual fingerprint so the user can
-        // verify identity out-of-band. Detects MITM key substitution in
-        // /users/{id}.messagePublicKey or bindings/{id}.pubkey.
-        loadPeerFingerprint(id)
+        if (isGroup(id)) {
+            val members = groupMembers(id)
+            binding.chatTitle.text = "👥 ${groupName(id)}"
+            binding.chatPeerId.text = "${members.size} members"
+            binding.chatPeerId.visibility = View.VISIBLE
+            // Hide add-contact pill + call button for groups (no 1:1 call).
+            binding.btnBannerAddContact.visibility = View.GONE
+            binding.btnCall.visibility = View.GONE
+        } else {
+            binding.chatTitle.text = contactName(id)
+            binding.btnCall.visibility = View.VISIBLE
+            updateAddContactBanner(id)
+            loadPeerFingerprint(id)
+        }
+        cancelReply()
         // Reset search when switching chats
         chatSearchQuery = ""
         binding.chatSearchInput.text?.clear()
@@ -2306,6 +2325,13 @@ class MainActivity : AppCompatActivity() {
             binding.status.text = "Choose contact"
             return
         }
+
+        // Group fan-out: encrypt + write one /messages doc per member (excluding self).
+        if (isGroup(targetId)) {
+            sendGroupMessage(targetId, text)
+            return
+        }
+
         if (targetId == localId) {
             binding.status.text = "This is your own ID"
             return
@@ -2313,6 +2339,7 @@ class MainActivity : AppCompatActivity() {
 
         val firestore = firestoreOrWarn() ?: return
         val id = nextMessageId()
+        val replyTo = replyingToMsgId
         binding.btnSend.isEnabled = false
 
         firestore.collection("users").document(targetId).get()
@@ -2338,7 +2365,7 @@ class MainActivity : AppCompatActivity() {
                     return@addOnSuccessListener
                 }
 
-                val message = mapOf(
+                val message = mutableMapOf<String, Any>(
                     "from" to localId,
                     "to" to targetId,
                     "encryptedKey" to encrypted.encryptedKey,
@@ -2348,13 +2375,15 @@ class MainActivity : AppCompatActivity() {
                     "keyAlgorithm" to encrypted.keyAlgorithm,
                     "createdAt" to System.currentTimeMillis()
                 )
+                if (replyTo != null) message["replyTo"] = replyTo
 
                 firestore.collection("messages").document(id).set(message)
                     .addOnSuccessListener {
                         markMessageSeen(id)
                         saveMessageStatus(id, MsgStatus.SENT)
                         binding.messageInput.text?.clear()
-                        appendMessage(targetId, "Me", text, id)  // msgId embedded in log line
+                        appendMessage(targetId, "Me", text, id, replyToMsgId = replyTo)
+                        cancelReply()
                         runOnUiThread {
                             binding.btnSend.isEnabled = true
                             binding.status.text = "Encrypted sent to ${contactName(targetId)}"
@@ -2430,17 +2459,34 @@ class MainActivity : AppCompatActivity() {
             Log.w(TAG, "delivery receipt write failed msgId=$id err=${e.message}")
         }
 
+        // Optional group routing + reply linking.
+        val groupId = document.getString("groupId")?.takeIf { it.isNotBlank() }
+        val replyTo = document.getString("replyTo")?.takeIf { it.isNotBlank() }
+        // The chatId for the local log: group conversations use the groupId so
+        // every member's view of the same group is keyed identically; 1:1
+        // conversations key on the sender's localId as before. The original
+        // msgId of the fan-out is "{baseMsgId}-{recipient}" so strip the
+        // recipient suffix to get the canonical sender-issued id when in group
+        // context — keeps reply lookups and dedup consistent across recipients.
+        val canonicalMsgId = if (groupId != null) {
+            id.removeSuffix("-$localId")
+        } else id
+        val chatId = groupId ?: senderId
+
         runOnUiThread {
-            rememberContact(senderId)
-            appendMessage(senderId, contactName(senderId), text)
-            notifyIncomingMessage(senderId, text)
+            if (groupId == null) rememberContact(senderId)
+            // Persist the reply link locally so the bubble can render its preview.
+            if (replyTo != null) {
+                prefs.edit().putString("$KEY_REPLY_PREFIX$canonicalMsgId", replyTo).apply()
+            }
+            val author = if (groupId != null) contactName(senderId) else contactName(senderId)
+            appendMessage(chatId, author, text, canonicalMsgId, replyToMsgId = replyTo)
+            notifyIncomingMessage(chatId, text)
             binding.status.text = "Message from ${contactName(senderId)}"
-            if (remoteId == senderId && binding.chatScreen.visibility == View.VISIBLE) {
+            if (remoteId == chatId && binding.chatScreen.visibility == View.VISIBLE) {
                 binding.chatStatus.text = "Message from ${contactName(senderId)}"
-                // Chat is open — mark read immediately
                 sendCloudReadReceipt(id, senderId)
             } else {
-                // Chat closed — queue for when user opens it
                 pendingCloudReadReceipts.getOrPut(senderId) { mutableSetOf() }.add(id)
             }
             deleteCloudMessage(document)
@@ -2769,15 +2815,23 @@ class MainActivity : AppCompatActivity() {
         return "$localId-${System.currentTimeMillis()}-$seq"
     }
 
-    private fun appendMessage(chatId: String, author: String, text: String, msgId: String? = null) {
+    private fun appendMessage(chatId: String, author: String, text: String, msgId: String? = null,
+                                replyToMsgId: String? = null) {
         // Last-line defence: blank/whitespace text must never reach the chat log.
         // Photo bubbles arrive as "[PHOTO:path]" which is not blank, so this is safe.
         if (text.isBlank()) return
+        // Persist reply link separately from the log line so log format stays
+        // simple. Looked up by render via getReplyTarget(msgId).
+        if (msgId != null && replyToMsgId != null) {
+            prefs.edit().putString("$KEY_REPLY_PREFIX$msgId", replyToMsgId).apply()
+        }
         val update = {
             val log = messageLogFor(chatId)
-            // Embed msgId in author field for outgoing messages: "Me|{msgId}: text\t{ts}"
-            // This allows status lookup without fragile line-index matching.
-            val authorField = if (msgId != null && author == "Me") "Me|$msgId" else author
+            // Embed msgId in author field for all messages so reply-to + status
+            // lookups work for incoming too: "Me|{msgId}: text\t{ts}" outgoing,
+            // "{contactName}|{msgId}: text\t{ts}" incoming. Legacy entries
+            // (msgId == null) keep the old "{author}: text" form for compat.
+            val authorField = if (msgId != null) "$author|$msgId" else author
             // Escape real newlines in text so multi-line messages occupy exactly one log entry.
             //   (Unicode Line Separator) is visually invisible in normal text but safe here.
             val safeText = text.replace('\n', ' ')
@@ -2857,16 +2911,26 @@ class MainActivity : AppCompatActivity() {
         return line.substring(tab + 1).toLongOrNull() ?: 0L
     }
 
-    /** Extract msgId embedded in outgoing log lines: "Me|{msgId}: text" → msgId, or null for old format. */
+    /**
+     * Extract msgId embedded in log lines.
+     *
+     * New format (v1.14.20+): `"{author}|{msgId}: text"` — works for any author.
+     * Legacy outgoing-only format: `"Me|{msgId}: text"` (still covered by the
+     * same logic since "Me" has no embedded "|").
+     *
+     * Returns null for entries that pre-date the embedded-msgId format.
+     */
     private fun lineMsgId(line: String): String? {
         // trimStart() — same Codex v1.13.x leading-whitespace corruption fix
-        // as in parseLineAuthorText(). Without it, lookup of status for
-        // outgoing messages restored from those builds returns null and the
-        // ✓ marker disappears.
+        // as in parseLineAuthorText().
         val text = lineText(line).trimStart()
-        if (!text.startsWith("Me|")) return null
         val sep = text.indexOf(": ")
-        return if (sep > 3) text.substring(3, sep) else null
+        if (sep < 0) return null
+        val authorField = text.substring(0, sep)
+        val pipe = authorField.indexOf('|')
+        if (pipe < 0) return null
+        val msgId = authorField.substring(pipe + 1)
+        return msgId.takeIf { it.isNotBlank() }
     }
 
     /**
@@ -2891,22 +2955,204 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun parseLineAuthorText(line: String): Pair<String, String> {
-        // trimStart() handles entries written by an older code path that
-        // accidentally prefixed the author field with whitespace (observed
-        // in chat logs migrated from Codex v1.13.x builds — caused outgoing
-        // messages to render as incoming because "    Me|..." did not match
-        // startsWith("Me|")).
         val text = lineText(line).trimStart()
-        // New format: "Me|{msgId}: text" — strip msgId from author
-        if (text.startsWith("Me|")) {
-            val sep = text.indexOf(": ")
-            return if (sep >= 0) "Me" to text.substring(sep + 2) else "Me" to text
-        }
-        // Legacy format: "Me: text"
-        if (text.startsWith("Me: ")) return "Me" to text.removePrefix("Me: ")
+        // Generic "{author}|{msgId}: body" — author = part before "|".
+        // Covers v1.14.20+ embedded-msgId-for-all-authors format.
         val ci = text.indexOf(": ")
-        return if (ci >= 0) text.substring(0, ci) to text.substring(ci + 2)
-               else "" to text
+        if (ci < 0) return "" to text
+        val authorField = text.substring(0, ci)
+        val body = text.substring(ci + 2)
+        val pipe = authorField.indexOf('|')
+        val author = if (pipe >= 0) authorField.substring(0, pipe) else authorField
+        return author to body
+    }
+
+    /**
+     * Fan-out group send: encrypt the same plaintext under each member's pubkey
+     * (sender excluded), write a /messages doc per recipient with a shared
+     * `groupId` field. Receivers route the message into the group chat instead
+     * of the 1:1 chat by looking at `groupId`.
+     *
+     * Same outgoing msgId is reused across the fan-out so the sender sees only
+     * one bubble in their own chat log.
+     */
+    private fun sendGroupMessage(groupId: String, text: String) {
+        val firestore = firestoreOrWarn() ?: return
+        val members = groupMembers(groupId).filter { it != localId }
+        if (members.isEmpty()) {
+            Toast.makeText(this, "Group has no other members", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val msgId = nextMessageId()
+        val replyTo = replyingToMsgId
+        binding.btnSend.isEnabled = false
+
+        // Save sender's local bubble first so the user sees instant feedback.
+        appendMessage(groupId, "Me", text, msgId, replyToMsgId = replyTo)
+        cancelReply()
+        binding.messageInput.text?.clear()
+        saveMessageStatus(msgId, MsgStatus.SENT)
+
+        val pending = java.util.concurrent.atomic.AtomicInteger(members.size)
+        members.forEach { memberId ->
+            firestore.collection("users").document(memberId).get()
+                .addOnSuccessListener { userDoc ->
+                    val publicKeyB64 = userDoc.getString("messagePublicKey")
+                    if (publicKeyB64.isNullOrBlank()) {
+                        Log.w(TAG, "group send: $memberId missing pubkey")
+                        if (pending.decrementAndGet() == 0) runOnUiThread { binding.btnSend.isEnabled = true }
+                        return@addOnSuccessListener
+                    }
+                    val encrypted = runCatching { encryptMessageFor(text, publicKeyB64) }.getOrNull()
+                    if (encrypted == null) {
+                        if (pending.decrementAndGet() == 0) runOnUiThread { binding.btnSend.isEnabled = true }
+                        return@addOnSuccessListener
+                    }
+                    val docId = "$msgId-$memberId"
+                    val message = mutableMapOf<String, Any>(
+                        "from" to localId,
+                        "to" to memberId,
+                        "groupId" to groupId,
+                        "encryptedKey" to encrypted.encryptedKey,
+                        "iv" to encrypted.iv,
+                        "cipherText" to encrypted.cipherText,
+                        "messageAlgorithm" to AES_MESSAGE_ALGORITHM,
+                        "keyAlgorithm" to encrypted.keyAlgorithm,
+                        "createdAt" to System.currentTimeMillis()
+                    )
+                    if (replyTo != null) message["replyTo"] = replyTo
+                    firestore.collection("messages").document(docId).set(message)
+                        .addOnFailureListener { e -> Log.w(TAG, "group send to $memberId failed: ${e.message}") }
+                        .addOnCompleteListener {
+                            if (pending.decrementAndGet() == 0) runOnUiThread {
+                                binding.btnSend.isEnabled = true
+                                binding.chatStatus.text = "Sent to ${members.size} members"
+                            }
+                        }
+                }
+                .addOnFailureListener {
+                    if (pending.decrementAndGet() == 0) runOnUiThread { binding.btnSend.isEnabled = true }
+                }
+        }
+    }
+
+    /** Look up the msgId this message is a reply to, or null. */
+    private fun getReplyTarget(msgId: String?): String? {
+        if (msgId.isNullOrBlank()) return null
+        return prefs.getString("$KEY_REPLY_PREFIX$msgId", null)
+    }
+
+    /**
+     * Find the rendered body of a previously sent/received message by its msgId
+     * inside the given chat's log. Used to build the small preview shown above
+     * a reply bubble.
+     */
+    private fun lookupMessagePreview(chatId: String, targetMsgId: String): String? {
+        val lines = splitLogLines(messageLogFor(chatId).toString())
+        for (line in lines) {
+            if (lineMsgId(line) == targetMsgId) {
+                val (_, body) = parseLineAuthorText(line)
+                return when {
+                    body.startsWith("[PHOTO:") -> "📷 Photo"
+                    body.startsWith("[PHOTO_PENDING:") -> "📷 Photo"
+                    body.startsWith("[PHOTO_FAILED:") -> "📷 Photo"
+                    else -> body.take(60)
+                }
+            }
+        }
+        return null
+    }
+
+    // ─── Group chats ──────────────────────────────────────────────────────────
+
+    private fun savedGroupIds(): Set<String> =
+        prefs.getStringSet(KEY_GROUP_IDS, emptySet()).orEmpty()
+
+    private fun isGroup(id: String): Boolean = id.startsWith(GROUP_ID_PREFIX)
+
+    private fun groupName(id: String): String =
+        prefs.getString("$KEY_GROUP_NAME_PREFIX$id", null)?.takeIf { it.isNotBlank() } ?: id
+
+    private fun groupMembers(id: String): List<String> {
+        val csv = prefs.getString("$KEY_GROUP_MEMBERS_PREFIX$id", null) ?: return emptyList()
+        return csv.split(",").filter { it.isNotBlank() }
+    }
+
+    private fun groupAdmin(id: String): String? =
+        prefs.getString("$KEY_GROUP_ADMIN_PREFIX$id", null)
+
+    /**
+     * Show a dialog: group name + checkbox list of saved contacts.
+     * Creator becomes the admin and is auto-added to members.
+     */
+    private fun showNewGroupDialog() {
+        val contacts = savedContactIds().sortedBy { contactName(it).lowercase(Locale.US) }
+        if (contacts.isEmpty()) {
+            Toast.makeText(this, "Add some contacts first", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val dp = resources.displayMetrics.density
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding((20 * dp).toInt(), (8 * dp).toInt(), (20 * dp).toInt(), 0)
+        }
+        val nameInput = EditText(this).apply {
+            hint = "Group name"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS
+            maxLines = 1
+        }
+        container.addView(nameInput)
+        container.addView(android.widget.TextView(this).apply {
+            text = "Members"
+            setPadding(0, (12 * dp).toInt(), 0, (4 * dp).toInt())
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_muted))
+        })
+        val checkboxes = contacts.map { id ->
+            android.widget.CheckBox(this).apply {
+                text = contactName(id)
+                tag = id
+            }
+        }
+        checkboxes.forEach { container.addView(it) }
+
+        AlertDialog.Builder(this)
+            .setTitle("New group")
+            .setView(container)
+            .setPositiveButton("Create") { _, _ ->
+                val name = nameInput.text.toString().trim().ifBlank { "Untitled" }
+                val selected = checkboxes.filter { it.isChecked }.map { it.tag as String }
+                if (selected.isEmpty()) {
+                    Toast.makeText(this, "Pick at least one member", Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+                val rawId = java.util.UUID.randomUUID().toString().take(12).uppercase(Locale.US)
+                val groupId = "$GROUP_ID_PREFIX$rawId"
+                val members = (selected + localId).distinct()
+                saveGroup(groupId, name, members, localId)
+                renderContacts()
+                openChat(groupId)
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /** Persist a newly-created group locally. Also writes the /groups Firestore doc. */
+    private fun saveGroup(id: String, name: String, members: List<String>, adminId: String) {
+        prefs.edit()
+            .putStringSet(KEY_GROUP_IDS, savedGroupIds() + id)
+            .putString("$KEY_GROUP_NAME_PREFIX$id", name)
+            .putString("$KEY_GROUP_MEMBERS_PREFIX$id", members.joinToString(","))
+            .putString("$KEY_GROUP_ADMIN_PREFIX$id", adminId)
+            .apply()
+        val rawId = id.removePrefix(GROUP_ID_PREFIX)
+        db?.collection("groups")?.document(rawId)?.set(
+            mapOf(
+                "name" to name,
+                "members" to members,
+                "adminId" to adminId,
+                "createdAt" to System.currentTimeMillis()
+            )
+        )?.addOnFailureListener { e -> Log.w(TAG, "group write failed: ${e.message}") }
     }
 
     private fun formatMessageTime(epochMs: Long): String {
@@ -2957,7 +3203,12 @@ class MainActivity : AppCompatActivity() {
             } else null
 
             val lineTs = lineTimestamp(line)
-            val onLongClick: () -> Unit = { showMessageContextMenu(chatId, lineTs, text, isOutgoing) }
+            val lineMsgId = lineMsgId(line)
+            val onLongClick: () -> Unit = { showMessageContextMenu(chatId, lineTs, text, isOutgoing, lineMsgId) }
+            val replyPreview = lineMsgId?.let { getReplyTarget(it) }?.let { lookupMessagePreview(chatId, it) }
+            // Group chats: show sender name above incoming bubbles so readers
+            // can tell members apart.
+            val senderLabel = if (!isOutgoing && isGroup(chatId)) author.takeIf { it.isNotBlank() } else null
             binding.messagesContainer.addView(
                 when {
                     text.startsWith("[PHOTO:") && text.endsWith("]") -> {
@@ -2974,7 +3225,8 @@ class MainActivity : AppCompatActivity() {
                         createPhotoBubble(path, isOutgoing, ts, onLongClick, photoState = PhotoState.FAILED)
                     }
                     else -> {
-                        createTextBubble(text, isOutgoing, ts, status, onLongClick)
+                        createTextBubble(text, isOutgoing, ts, status, onLongClick,
+                            replyPreview = replyPreview, senderLabel = senderLabel)
                     }
                 }
             )
@@ -2982,7 +3234,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun createTextBubble(text: String, isOutgoing: Boolean, time: String?, status: MsgStatus?,
-                                  onLongClick: (() -> Unit)? = null): android.view.View {
+                                  onLongClick: (() -> Unit)? = null,
+                                  replyPreview: String? = null,
+                                  senderLabel: String? = null): android.view.View {
         val dp = resources.displayMetrics.density
 
         val bubbleLayout = android.widget.LinearLayout(this).apply {
@@ -2994,6 +3248,46 @@ class MainActivity : AppCompatActivity() {
             val pad = (12 * dp).toInt()
             val padV = (8 * dp).toInt()
             setPadding(pad, padV, pad, padV)
+
+            // Group chats: show sender's name above the message for incoming bubbles.
+            if (senderLabel != null) {
+                addView(android.widget.TextView(this@MainActivity).apply {
+                    this.text = senderLabel
+                    textSize = 11f
+                    setTextColor(0xFF4FC3F7.toInt())
+                    setTypeface(typeface, android.graphics.Typeface.BOLD)
+                    setPadding(0, 0, 0, (2 * dp).toInt())
+                })
+            }
+
+            // Reply preview: tiny quoted block above message body.
+            if (replyPreview != null) {
+                addView(android.widget.LinearLayout(this@MainActivity).apply {
+                    orientation = android.widget.LinearLayout.HORIZONTAL
+                    background = android.graphics.drawable.GradientDrawable().apply {
+                        shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+                        cornerRadius = 6 * dp
+                        setColor(0x33FFFFFF)
+                    }
+                    setPadding((8 * dp).toInt(), (4 * dp).toInt(), (8 * dp).toInt(), (4 * dp).toInt())
+                    layoutParams = android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                        android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply { bottomMargin = (4 * dp).toInt() }
+
+                    addView(android.view.View(this@MainActivity).apply {
+                        layoutParams = android.widget.LinearLayout.LayoutParams((3 * dp).toInt(), android.widget.LinearLayout.LayoutParams.MATCH_PARENT)
+                            .apply { rightMargin = (6 * dp).toInt() }
+                        setBackgroundColor(0xFF4FC3F7.toInt())
+                    })
+                    addView(android.widget.TextView(this@MainActivity).apply {
+                        this.text = replyPreview
+                        textSize = 12f
+                        setTextColor(0xFFCCCCCC.toInt())
+                        maxLines = 2
+                    })
+                })
+            }
 
             addView(android.widget.TextView(this@MainActivity).apply {
                 this.text = text
@@ -3267,18 +3561,25 @@ class MainActivity : AppCompatActivity() {
 
     // ─── Message context menu (long-press) ───────────────────────────────────
 
-    private fun showMessageContextMenu(chatId: String, lineTs: Long, text: String, @Suppress("UNUSED_PARAMETER") isOutgoing: Boolean) {
-        // When search is active, show only Copy (delete index is ambiguous with filtered view)
-        val items = if (chatSearchQuery.isBlank()) arrayOf("Copy text", "Delete message") else arrayOf("Copy text")
+    private fun showMessageContextMenu(chatId: String, lineTs: Long, text: String, @Suppress("UNUSED_PARAMETER") isOutgoing: Boolean, msgId: String? = null) {
+        // When search is active, show only Copy + Reply (delete index is ambiguous with filtered view)
+        val canReply = msgId != null
+        val items = mutableListOf("Copy text")
+        if (canReply) items.add("Reply")
+        if (chatSearchQuery.isBlank()) items.add("Delete message")
         AlertDialog.Builder(this)
-            .setItems(items) { _, which ->
-                when (which) {
-                    0 -> {
+            .setItems(items.toTypedArray()) { _, which ->
+                val label = items[which]
+                when (label) {
+                    "Copy text" -> {
                         val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
                         cm.setPrimaryClip(android.content.ClipData.newPlainText("message", text))
                         Toast.makeText(this, "Copied", Toast.LENGTH_SHORT).show()
                     }
-                    1 -> AlertDialog.Builder(this)
+                    "Reply" -> {
+                        msgId?.let { startReplyingTo(it) }
+                    }
+                    "Delete message" -> AlertDialog.Builder(this)
                         .setMessage("Delete this message?")
                         .setPositiveButton("Delete") { _, _ -> deleteMessageAt(chatId, lineTs) }
                         .setNegativeButton("Cancel", null)
@@ -3286,6 +3587,20 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             .show()
+    }
+
+    /** Enters reply-mode: shows the preview bar above the input + focuses input. */
+    private fun startReplyingTo(msgId: String) {
+        replyingToMsgId = msgId
+        val preview = lookupMessagePreview(remoteId, msgId) ?: "(unknown message)"
+        binding.replyPreviewText.text = preview
+        binding.replyPreviewBar.visibility = View.VISIBLE
+        binding.messageInput.requestFocus()
+    }
+
+    private fun cancelReply() {
+        replyingToMsgId = null
+        binding.replyPreviewBar.visibility = View.GONE
     }
 
     private fun deleteMessageAt(chatId: String, lineTs: Long) {
@@ -5522,6 +5837,13 @@ class MainActivity : AppCompatActivity() {
         private const val BACKUP_VERSION = 3
         private const val BACKUP_SALT_BYTES = 16
         private const val BACKUP_PBKDF2_ITERS = 600_000
+        // ── Reply-to / Groups (v1.14.20) ─────────────────────────────────
+        private const val KEY_REPLY_PREFIX = "reply_"          // reply_{msgId} → original msgId
+        private const val KEY_GROUP_IDS = "group_ids"          // Set<groupId>
+        private const val KEY_GROUP_NAME_PREFIX = "group_name_"
+        private const val KEY_GROUP_MEMBERS_PREFIX = "group_members_"
+        private const val KEY_GROUP_ADMIN_PREFIX = "group_admin_"
+        private const val GROUP_ID_PREFIX = "g:"
 
         /** 64-emoji alphabet (power of 2 so byte → index is a simple AND mask). */
         private val FINGERPRINT_ALPHABET = arrayOf(

@@ -443,6 +443,64 @@
                     android:paddingBottom="8dp"/>
             </ScrollView>
 
+            <!-- Reply preview bar (shown above input when user taps Reply on a bubble) -->
+            <LinearLayout
+                android:id="@+id/replyPreviewBar"
+                android:layout_width="match_parent"
+                android:layout_height="40dp"
+                android:layout_marginTop="6dp"
+                android:background="@color/control"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingStart="10dp"
+                android:paddingEnd="4dp"
+                android:visibility="gone">
+
+                <View
+                    android:layout_width="3dp"
+                    android:layout_height="match_parent"
+                    android:layout_marginEnd="8dp"
+                    android:background="#FF4FC3F7" />
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Replying"
+                        android:textColor="#FF4FC3F7"
+                        android:textSize="11sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/replyPreviewText"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:singleLine="true"
+                        android:textColor="@color/text_muted"
+                        android:textSize="12sp"
+                        tools:text="Какое-то сообщение..." />
+                </LinearLayout>
+
+                <Button
+                    android:id="@+id/btnCancelReply"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:gravity="center"
+                    android:includeFontPadding="false"
+                    android:minWidth="0dp"
+                    android:minHeight="0dp"
+                    android:padding="0dp"
+                    android:text="&#10005;"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="16sp" />
+            </LinearLayout>
+
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="48dp"
@@ -888,6 +946,13 @@
                     style="@style/DrawerItem">
                     <TextView style="@style/DrawerItemIcon" android:text="&#9678;" />
                     <TextView style="@style/DrawerItemText" android:text="Scan QR code" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/btnNewGroup"
+                    style="@style/DrawerItem">
+                    <TextView style="@style/DrawerItemIcon" android:text="&#128101;" />
+                    <TextView style="@style/DrawerItemText" android:text="New group" />
                 </LinearLayout>
 
                 <!-- Section: Data -->
