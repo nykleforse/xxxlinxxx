@@ -550,26 +550,41 @@
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:background="@color/oled_black"
-            android:gravity="center"
+            android:gravity="center_horizontal"
             android:orientation="vertical"
             android:visibility="gone">
 
-            <TextView
+            <Space
                 android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1" />
+
+            <TextView
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
+                android:letterSpacing="0.18"
+                android:text="INCOMING CALL"
+                android:textColor="@color/text_muted"
+                android:textSize="11sp" />
+
+            <TextView
+                android:layout_width="140dp"
+                android:layout_height="140dp"
+                android:layout_marginTop="20dp"
+                android:background="@drawable/bg_avatar_circle"
                 android:gravity="center"
-                android:text="Incoming call"
-                android:textColor="@color/text_secondary"
-                android:textSize="14sp" />
+                android:text="📞"
+                android:textColor="@color/text_primary"
+                android:textSize="56sp" />
 
             <TextView
                 android:id="@+id/incomingCallerName"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
+                android:layout_marginTop="24dp"
                 android:gravity="center"
                 android:textColor="@color/text_primary"
-                android:textSize="28sp"
+                android:textSize="26sp"
                 android:textStyle="bold"
                 tools:text="Alex" />
 
@@ -577,16 +592,24 @@
                 android:id="@+id/incomingCallerId"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
+                android:layout_marginTop="4dp"
+                android:fontFamily="monospace"
                 android:gravity="center"
                 android:textColor="@color/text_muted"
                 android:textSize="13sp"
                 tools:text="4C024A76" />
 
+            <Space
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1" />
+
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="56dp"
-                android:layout_marginTop="36dp"
+                android:layout_marginStart="24dp"
+                android:layout_marginEnd="24dp"
+                android:layout_marginBottom="48dp"
                 android:orientation="horizontal">
 
                 <Button
@@ -594,9 +617,11 @@
                     android:layout_width="0dp"
                     android:layout_height="match_parent"
                     android:layout_weight="1"
-                    android:backgroundTint="@color/control"
-                    android:text="Decline"
-                    android:textColor="@color/text_primary" />
+                    android:background="@drawable/bg_action_red"
+                    android:text="✕  Decline"
+                    android:textColor="#FFFFE0E0"
+                    android:textSize="15sp"
+                    android:textStyle="bold" />
 
                 <Button
                     android:id="@+id/btnAcceptIncoming"
@@ -604,9 +629,11 @@
                     android:layout_height="match_parent"
                     android:layout_marginStart="12dp"
                     android:layout_weight="1"
-                    android:backgroundTint="@color/control"
-                    android:text="Accept"
-                    android:textColor="@color/text_primary" />
+                    android:background="@drawable/bg_action_green"
+                    android:text="✓  Accept"
+                    android:textColor="#FFE0FFE0"
+                    android:textSize="15sp"
+                    android:textStyle="bold" />
             </LinearLayout>
         </LinearLayout>
 
@@ -616,56 +643,86 @@
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:background="@color/oled_black"
-            android:gravity="center"
+            android:gravity="center_horizontal"
             android:orientation="vertical"
             android:visibility="gone">
 
-            <TextView
+            <Space
                 android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1" />
+
+            <TextView
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
+                android:letterSpacing="0.18"
+                android:text="CALLING"
+                android:textColor="@color/text_muted"
+                android:textSize="11sp" />
+
+            <TextView
+                android:layout_width="140dp"
+                android:layout_height="140dp"
+                android:layout_marginTop="20dp"
+                android:background="@drawable/bg_avatar_circle"
                 android:gravity="center"
-                android:text="Calling"
-                android:textColor="@color/text_secondary"
-                android:textSize="14sp" />
+                android:text="☎"
+                android:textColor="@color/text_primary"
+                android:textSize="60sp" />
 
             <TextView
                 android:id="@+id/outgoingCallName"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
+                android:layout_marginTop="24dp"
                 android:gravity="center"
                 android:textColor="@color/text_primary"
-                android:textSize="28sp"
+                android:textSize="26sp"
                 android:textStyle="bold"
                 tools:text="Alex" />
 
-            <TextView
-                android:id="@+id/outgoingCallCountdown"
-                android:layout_width="match_parent"
+            <LinearLayout
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="24dp"
-                android:gravity="center"
-                android:text="30"
-                android:textColor="@color/text_primary"
-                android:textSize="54sp"
-                android:textStyle="bold" />
+                android:layout_marginTop="32dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
 
-            <TextView
+                <TextView
+                    android:id="@+id/outgoingCallCountdown"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="30"
+                    android:textColor="@color/text_primary"
+                    android:textSize="48sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:text="s"
+                    android:textColor="@color/text_muted"
+                    android:textSize="18sp" />
+            </LinearLayout>
+
+            <Space
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:gravity="center"
-                android:text="seconds"
-                android:textColor="@color/text_muted"
-                android:textSize="13sp" />
+                android:layout_height="0dp"
+                android:layout_weight="1" />
 
             <Button
                 android:id="@+id/btnCancelOutgoingCall"
                 android:layout_width="match_parent"
                 android:layout_height="56dp"
-                android:layout_marginTop="42dp"
-                android:backgroundTint="@color/control"
-                android:text="Cancel"
-                android:textColor="@color/text_primary" />
+                android:layout_marginStart="24dp"
+                android:layout_marginEnd="24dp"
+                android:layout_marginBottom="48dp"
+                android:background="@drawable/bg_action_red"
+                android:text="✕  Cancel"
+                android:textColor="#FFFFE0E0"
+                android:textSize="15sp"
+                android:textStyle="bold" />
         </LinearLayout>
 
         <!-- ACTIVE CALL -->
@@ -678,22 +735,35 @@
             android:orientation="vertical"
             android:visibility="gone">
 
-            <TextView
-                android:id="@+id/callTimer"
+            <Space
                 android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1" />
+
+            <TextView
+                android:id="@+id/activeCallStatus"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="48dp"
+                android:letterSpacing="0.18"
+                android:text="CONNECTED"
+                android:textColor="@color/text_muted"
+                android:textSize="11sp" />
+
+            <TextView
+                android:layout_width="140dp"
+                android:layout_height="140dp"
+                android:layout_marginTop="20dp"
+                android:background="@drawable/bg_avatar_circle"
                 android:gravity="center"
-                android:text="00:00"
+                android:text="🎙️"
                 android:textColor="@color/text_primary"
-                android:textSize="42sp"
-                android:textStyle="bold" />
+                android:textSize="56sp" />
 
             <TextView
                 android:id="@+id/activeCallName"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="16dp"
+                android:layout_marginTop="24dp"
                 android:gravity="center"
                 android:textColor="@color/text_primary"
                 android:textSize="22sp"
@@ -701,14 +771,15 @@
                 tools:text="Alex" />
 
             <TextView
-                android:id="@+id/activeCallStatus"
+                android:id="@+id/callTimer"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="6dp"
+                android:fontFamily="monospace"
                 android:gravity="center"
-                android:text="Connecting"
+                android:text="00:00"
                 android:textColor="@color/text_secondary"
-                android:textSize="14sp" />
+                android:textSize="16sp" />
 
             <Space
                 android:layout_width="match_parent"
@@ -717,42 +788,48 @@
 
             <LinearLayout
                 android:layout_width="match_parent"
-                android:layout_height="96dp"
-                android:layout_marginBottom="36dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="20dp"
+                android:layout_marginEnd="20dp"
+                android:layout_marginBottom="40dp"
                 android:gravity="center"
                 android:orientation="horizontal">
 
                 <Button
                     android:id="@+id/btnMuteMic"
                     android:layout_width="0dp"
-                    android:layout_height="64dp"
+                    android:layout_height="56dp"
                     android:layout_weight="1"
-                    android:backgroundTint="@color/control"
+                    android:background="@drawable/bg_action_neutral"
                     android:minWidth="0dp"
-                    android:text="Mic"
-                    android:textColor="@color/text_primary" />
+                    android:text="🎤 Mic"
+                    android:textColor="@color/text_primary"
+                    android:textSize="14sp" />
 
                 <Button
                     android:id="@+id/btnToggleSpeaker"
                     android:layout_width="0dp"
-                    android:layout_height="64dp"
+                    android:layout_height="56dp"
                     android:layout_marginStart="10dp"
                     android:layout_weight="1"
-                    android:backgroundTint="@color/control"
+                    android:background="@drawable/bg_action_neutral"
                     android:minWidth="0dp"
-                    android:text="Speaker"
-                    android:textColor="@color/text_primary" />
+                    android:text="🔊 Spk"
+                    android:textColor="@color/text_primary"
+                    android:textSize="14sp" />
 
                 <Button
                     android:id="@+id/btnEndActiveCall"
                     android:layout_width="0dp"
-                    android:layout_height="64dp"
+                    android:layout_height="56dp"
                     android:layout_marginStart="10dp"
                     android:layout_weight="1"
-                    android:backgroundTint="@color/control"
+                    android:background="@drawable/bg_action_red"
                     android:minWidth="0dp"
-                    android:text="End"
-                    android:textColor="@color/text_primary" />
+                    android:text="✕ End"
+                    android:textColor="#FFFFE0E0"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
             </LinearLayout>
         </LinearLayout>
 
