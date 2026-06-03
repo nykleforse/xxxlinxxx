@@ -99,17 +99,19 @@
             android:orientation="vertical"
             android:visibility="gone">
 
-            <!-- Header: hamburger + title -->
+            <!-- Header: hamburger + "Chats" + pill-shaped search input inline.
+                 Same visual feel as the drawer items — rounded background,
+                 muted text, compact height. -->
             <LinearLayout
                 android:layout_width="match_parent"
-                android:layout_height="48dp"
+                android:layout_height="56dp"
                 android:gravity="center_vertical"
                 android:orientation="horizontal">
 
                 <Button
                     android:id="@+id/btnMenu"
-                    android:layout_width="48dp"
-                    android:layout_height="48dp"
+                    android:layout_width="40dp"
+                    android:layout_height="40dp"
                     android:background="?attr/selectableItemBackgroundBorderless"
                     android:gravity="center"
                     android:includeFontPadding="false"
@@ -121,14 +123,30 @@
                     android:textSize="22sp" />
 
                 <TextView
-                    android:layout_width="0dp"
+                    android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:layout_marginStart="8dp"
-                    android:layout_weight="1"
+                    android:layout_marginStart="6dp"
                     android:text="Chats"
                     android:textColor="@color/text_primary"
-                    android:textSize="20sp"
+                    android:textSize="18sp"
                     android:textStyle="bold" />
+
+                <EditText
+                    android:id="@+id/chatListSearchInput"
+                    android:layout_width="0dp"
+                    android:layout_height="40dp"
+                    android:layout_marginStart="12dp"
+                    android:layout_marginEnd="6dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_search_pill"
+                    android:hint="Search or paste ID"
+                    android:inputType="text"
+                    android:paddingStart="14dp"
+                    android:paddingEnd="14dp"
+                    android:singleLine="true"
+                    android:textColor="@color/text_primary"
+                    android:textColorHint="@color/text_muted"
+                    android:textSize="13sp" />
 
                 <TextView
                     android:id="@+id/tvUnreadCount"
@@ -138,7 +156,6 @@
                     android:gravity="center"
                     android:paddingStart="6dp"
                     android:paddingEnd="6dp"
-                    android:layout_marginEnd="4dp"
                     android:background="@drawable/bg_badge"
                     android:textColor="@color/oled_black"
                     android:textSize="12sp"
@@ -156,33 +173,10 @@
                 android:textSize="13sp"
                 android:visibility="gone" />
 
-            <!-- Search / add-contact bar.
-                 Live-filters the chat list as you type. If the query looks like
-                 a contact ID (4–32 uppercase hex/digit chars) and isn't already
-                 saved, an "Add as new contact" row appears under the matches. -->
-            <EditText
-                android:id="@+id/chatListSearchInput"
-                android:layout_width="match_parent"
-                android:layout_height="44dp"
-                android:layout_marginTop="8dp"
-                android:backgroundTint="@color/line"
-                android:hint="Search chats or paste an ID"
-                android:inputType="text"
-                android:singleLine="true"
-                android:textColor="@color/text_primary"
-                android:textColorHint="@color/text_muted"
-                android:textSize="14sp" />
-
-            <View
-                android:layout_width="match_parent"
-                android:layout_height="1dp"
-                android:layout_marginTop="8dp"
-                android:background="@color/line" />
-
             <ScrollView
                 android:layout_width="match_parent"
                 android:layout_height="0dp"
-                android:layout_marginTop="8dp"
+                android:layout_marginTop="6dp"
                 android:layout_weight="1"
                 android:fillViewport="true">
 
