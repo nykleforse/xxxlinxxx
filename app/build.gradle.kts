@@ -96,6 +96,17 @@ android {
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
     }
+
+    // Rename APK outputs to `x-link-<versionName>[-debug].apk` so the file the
+    // user downloads to their phone has a recognizable name.
+    applicationVariants.all {
+        val variant = this
+        outputs.all {
+            val output = this as com.android.build.gradle.internal.api.BaseVariantOutputImpl
+            val suffix = if (variant.buildType.name == "debug") "-debug" else ""
+            output.outputFileName = "x-link-${variant.versionName}${suffix}.apk"
+        }
+    }
 }
 
 dependencies {
