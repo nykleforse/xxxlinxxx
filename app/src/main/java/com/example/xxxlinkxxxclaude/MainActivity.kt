@@ -153,6 +153,10 @@ class MainActivity : AppCompatActivity() {
     /** msgId of the message currently being replied to, or null. */
     private var replyingToMsgId: String? = null
 
+    // ── Chat list filter ──────────────────────────────────────────────────────
+    /** Search query for the chat list — empty string disables filtering. */
+    private var chatListQuery: String = ""
+
     // ── App lock ──────────────────────────────────────────────────────────────
     private var appUnlocked = false
 
@@ -912,6 +916,15 @@ class MainActivity : AppCompatActivity() {
             binding.drawerLayout.closeDrawer(GravityCompat.START)
             showNewGroupDialog()
         }
+        // Live chat-list filter.
+        binding.chatListSearchInput.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) {
+                chatListQuery = s?.toString().orEmpty()
+                renderContacts()
+            }
+        })
         // Group chat title row → open group info / management.
         binding.chatTitle.setOnClickListener {
             if (isGroup(remoteId)) showGroupInfo(remoteId)
@@ -1461,16 +1474,70 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Card displayed above the chat-list filter results when the query looks
+     * like a contact ID we don't have yet. Tap → open the inline add-contact
+     * banner dialog so the user can give the new contact a local name.
+     */
+    private fun addAddNewContactRow(id: String) {
+        val dp = resources.displayMetrics.density
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+                cornerRadius = 14 * dp
+                setColor(0xFF1A5276.toInt())
+            }
+            val padH = (16 * dp).toInt()
+            val padV = (14 * dp).toInt()
+            setPadding(padH, padV, padH, padV)
+            isClickable = true
+            isFocusable = true
+            addView(TextView(this@MainActivity).apply {
+                text = "+ Add new contact"
+                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_primary))
+                textSize = 14f
+            })
+            addView(TextView(this@MainActivity).apply {
+                text = id
+                setTextColor(0xFFAACCEE.toInt())
+                textSize = 13f
+                typeface = android.graphics.Typeface.MONOSPACE
+                setPadding(0, (2 * dp).toInt(), 0, 0)
+            })
+            setOnClickListener { showAddContactFromBannerDialog(id) }
+        }
+        binding.contactsList.addView(row, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { bottomMargin = (10 * dp).toInt() })
+    }
+
     private fun renderContacts() {
         updateUnreadBadge()
         binding.contactsList.removeAllViews()
         // Merge contacts + groups into one list, sort by last activity.
-        val contacts = (savedContactIds() + savedGroupIds())
+        val query = chatListQuery.trim()
+        val queryLower = query.lowercase(Locale.US)
+        val all = (savedContactIds() + savedGroupIds())
             .sortedWith(
                 compareByDescending<String> { lastChatActivity(it) }
                     .thenBy { (if (isGroup(it)) groupName(it) else contactName(it)).lowercase(Locale.US) }
                     .thenBy { it }
             )
+        // Filter by query: matches name, raw id, or last-message preview.
+        val contacts = if (query.isEmpty()) all else all.filter { id ->
+            val name = (if (isGroup(id)) groupName(id) else contactName(id)).lowercase(Locale.US)
+            name.contains(queryLower) ||
+                id.lowercase(Locale.US).contains(queryLower)
+        }
+        // CTA row: query looks like an ID we don't have yet → offer to add it.
+        if (query.isNotEmpty() && Regex("^[A-Z0-9]{4,32}$").matches(query.uppercase(Locale.US))) {
+            val normalised = query.uppercase(Locale.US)
+            if (normalised !in savedContactIds() && normalised != localId) {
+                addAddNewContactRow(normalised)
+            }
+        }
         if (contacts.isEmpty()) {
             val empty = TextView(this).apply {
                 text = "No contacts yet"
