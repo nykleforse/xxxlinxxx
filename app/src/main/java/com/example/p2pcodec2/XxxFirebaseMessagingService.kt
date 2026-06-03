@@ -21,7 +21,7 @@ import kotlin.math.absoluteValue
 class XxxFirebaseMessagingService : FirebaseMessagingService() {
     override fun onNewToken(token: String) {
         super.onNewToken(token)
-        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = com.example.p2pcodec2.SecurePrefs.get(this)
         prefs.edit().putString(KEY_FCM_TOKEN, token).apply()
         val localId = prefs.getString(KEY_LOCAL_ID, null)?.takeIf { it.isNotBlank() } ?: return
         FirebaseApp.initializeApp(this)
@@ -79,7 +79,7 @@ class XxxFirebaseMessagingService : FirebaseMessagingService() {
     }
 
     private fun isAppInForeground(): Boolean {
-        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = com.example.p2pcodec2.SecurePrefs.get(this)
         return prefs.getBoolean(KEY_APP_IN_FOREGROUND, false)
     }
 
@@ -178,12 +178,12 @@ class XxxFirebaseMessagingService : FirebaseMessagingService() {
 
     private fun contactName(id: String): String {
         if (id.isBlank()) return ""
-        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = com.example.p2pcodec2.SecurePrefs.get(this)
         return prefs.getString("$KEY_CONTACT_PREFIX$id", null)?.takeIf { it.isNotBlank() } ?: id
     }
 
     private fun incrementUnreadCount(): Int {
-        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = com.example.p2pcodec2.SecurePrefs.get(this)
         val count = prefs.getInt(KEY_UNREAD_NOTIFICATION_COUNT, 0) + 1
         prefs.edit().putInt(KEY_UNREAD_NOTIFICATION_COUNT, count).apply()
         return count

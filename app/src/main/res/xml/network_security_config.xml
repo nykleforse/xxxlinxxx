@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Network security config. Currently denies cleartext traffic globally (Firebase
+    is HTTPS-only anyway; this fails fast on accidental http:// references).
+
+    Certificate pinning for Google domains is intentionally left OUT of this
+    file. Google rotates the leaf cert every ~3 months and even rotates the root
+    CA periodically. Shipping stale pins = bricked clients on rotation day. If
+    you ever want to add pinning, the safe procedure is:
+
+      1. Fetch the current SPKI pins from https://pki.goog/repository/ for
+         GTS Root R1..R4. Verify with `openssl s_client -connect
+         firestore.googleapis.com:443 -showcerts`.
+      2. Pin ALL of those + at least one backup chain (e.g. the previous
+         generation roots).
+      3. Set <pin-set expiration="..."> 90–180 days in the future so misconfig
+         fails open rather than bricking the app permanently.
+      4. Monitor and re-ship before expiration. Pin rotation is operational
+         work that needs an alert pipeline; don't enable until that's in place.
+
+    See: https://developer.android.com/training/articles/security-config
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

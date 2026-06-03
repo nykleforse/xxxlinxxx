@@ -24,8 +24,8 @@ android {
         applicationId = "com.example.xxxlinkxxx"
         minSdk = 23
         targetSdk = 34
-        versionCode = 158
-        versionName = "1.14.18-beta"
+        versionCode = 159
+        versionName = "1.14.19-beta"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
@@ -51,7 +51,11 @@ android {
 
     buildTypes {
         getByName("release") {
-            isMinifyEnabled = false
+            // R8 minify + shrinkResources for smaller APK + harder reverse
+            // engineering. WebRTC / Codec2 JNI / Firebase / Coroutines / Biometric
+            // keep-rules live in proguard-rules.pro.
+            isMinifyEnabled = true
+            isShrinkResources = true
             if (projectDebugKeystore.exists()) {
                 signingConfig = signingConfigs.getByName("debug")
             }

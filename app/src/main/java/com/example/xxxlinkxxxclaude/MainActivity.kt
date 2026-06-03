@@ -276,7 +276,9 @@ class MainActivity : AppCompatActivity() {
             }
         })
 
-        prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        // EncryptedSharedPreferences (Keystore-wrapped AES-256-GCM master key) for
+        // all on-disk state. Migrates legacy plain prefs once at first launch.
+        prefs = com.example.p2pcodec2.SecurePrefs.get(this)
         initFirebase()
         currentVoiceMode.codec2Mode?.let { codec2 = Codec2Bridge(it) }
         binding.btnChooseAuthPhoto.setOnClickListener {
@@ -2629,6 +2631,16 @@ class MainActivity : AppCompatActivity() {
                 val payload = parts.getOrNull(2) ?: return
                 sendAck(id)
 
+                // Replay protection: reject any (ts, seq) ≤ max seen for this peer.
+                // msgId format is "peerId-ts-seq" set by nextMessageId(). Tracks
+                // per-peer monotonic order across sessions; survives restart via
+                // encrypted prefs. Combined with the in-memory receivedMessageIds
+                // Set, this closes the finite-LRU window in #5.
+                if (!acceptByReplayCounter(id)) {
+                    Log.d(TAG, "TXT replay rejected: $id")
+                    return
+                }
+
                 val isNew = synchronized(receivedMessageIds) { receivedMessageIds.add(id) }
                 if (!isNew) return
 
@@ -2654,6 +2666,36 @@ class MainActivity : AppCompatActivity() {
     private fun sendTextPacket(id: String, text: String) {
         val payload = Base64.encodeToString(text.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
         sendMessagePacket("TXT|$id|$payload")
+    }
+
+    /**
+     * Replay-protection check. msgId format is `<peerId>-<tsMs>-<seq>` set by
+     * [nextMessageId]. Per-peer max (ts, seq) is persisted in encrypted prefs.
+     *
+     * Accepts iff `(newTs, newSeq) > (storedTs, storedSeq)` lexicographically.
+     * On accept, updates the stored max. On reject, does not.
+     *
+     * Returns true if the message is fresh and should be processed.
+     */
+    private fun acceptByReplayCounter(msgId: String): Boolean {
+        val msgParts = msgId.split("-")
+        if (msgParts.size < 3) return true  // malformed msgId — fall through to dedup set
+        val peer = msgParts[0]
+        val ts = msgParts[1].toLongOrNull() ?: return true
+        val seq = msgParts[2].toIntOrNull() ?: return true
+
+        val key = "replay_max_$peer"
+        val stored = prefs.getString(key, null)
+        val (storedTs, storedSeq) = if (stored != null) {
+            val sp = stored.split(":")
+            (sp.getOrNull(0)?.toLongOrNull() ?: 0L) to (sp.getOrNull(1)?.toIntOrNull() ?: 0)
+        } else 0L to 0
+
+        val isNewer = ts > storedTs || (ts == storedTs && seq > storedSeq)
+        if (!isNewer) return false
+
+        prefs.edit().putString(key, "$ts:$seq").apply()
+        return true
     }
 
     private fun sendAck(id: String) {
