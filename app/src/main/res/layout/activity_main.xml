@@ -45,7 +45,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="52dp"
                 android:layout_marginTop="22dp"
-                android:backgroundTint="@color/control"
+                android:background="@drawable/bg_action_neutral"
                 android:text="Choose photo"
                 android:textColor="@color/text_primary" />
 
@@ -64,9 +64,11 @@
                 android:layout_width="match_parent"
                 android:layout_height="52dp"
                 android:layout_marginTop="16dp"
-                android:backgroundTint="@color/line"
+                android:background="@drawable/bg_input_pill"
                 android:hint="Password"
                 android:inputType="textPassword"
+                android:paddingStart="16dp"
+                android:paddingEnd="16dp"
                 android:textColor="@color/text_primary"
                 android:textColorHint="@color/text_muted"
                 android:textSize="16sp" />
@@ -76,10 +78,11 @@
                 android:layout_width="match_parent"
                 android:layout_height="52dp"
                 android:layout_marginTop="16dp"
-                android:backgroundTint="@color/control"
+                android:background="@drawable/bg_action_primary"
                 android:enabled="false"
                 android:text="Log in"
-                android:textColor="@color/text_primary" />
+                android:textColor="@color/text_primary"
+                android:textStyle="bold" />
 
             <TextView
                 android:layout_width="match_parent"
@@ -204,11 +207,17 @@
 
                 <Button
                     android:id="@+id/btnBackFromAddContact"
-                    android:layout_width="72dp"
-                    android:layout_height="match_parent"
-                    android:backgroundTint="@color/control"
-                    android:text="Back"
-                    android:textColor="@color/text_primary" />
+                    android:layout_width="44dp"
+                    android:layout_height="40dp"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:gravity="center"
+                    android:includeFontPadding="false"
+                    android:minWidth="0dp"
+                    android:minHeight="0dp"
+                    android:padding="0dp"
+                    android:text="←"
+                    android:textColor="@color/text_primary"
+                    android:textSize="22sp" />
 
                 <TextView
                     android:layout_width="0dp"
@@ -227,10 +236,13 @@
                 android:layout_width="match_parent"
                 android:layout_height="48dp"
                 android:layout_marginTop="24dp"
-                android:backgroundTint="@color/line"
+                android:background="@drawable/bg_input_pill"
+                android:fontFamily="monospace"
                 android:hint="Contact ID"
                 android:imeOptions="actionNext"
                 android:inputType="textNoSuggestions|textCapCharacters"
+                android:paddingStart="16dp"
+                android:paddingEnd="16dp"
                 android:singleLine="true"
                 android:textColor="@color/text_primary"
                 android:textColorHint="@color/text_muted" />
@@ -240,10 +252,12 @@
                 android:layout_width="match_parent"
                 android:layout_height="48dp"
                 android:layout_marginTop="8dp"
-                android:backgroundTint="@color/line"
+                android:background="@drawable/bg_input_pill"
                 android:hint="Local name"
                 android:imeOptions="actionDone"
                 android:inputType="textCapWords"
+                android:paddingStart="16dp"
+                android:paddingEnd="16dp"
                 android:singleLine="true"
                 android:textColor="@color/text_primary"
                 android:textColorHint="@color/text_muted" />
@@ -253,9 +267,10 @@
                 android:layout_width="match_parent"
                 android:layout_height="52dp"
                 android:layout_marginTop="16dp"
-                android:backgroundTint="@color/control"
+                android:background="@drawable/bg_action_primary"
                 android:text="Add"
-                android:textColor="@color/text_primary" />
+                android:textColor="@color/text_primary"
+                android:textStyle="bold" />
         </LinearLayout>
 
         <!-- CHAT -->
@@ -273,11 +288,17 @@
 
                 <Button
                     android:id="@+id/btnBack"
-                    android:layout_width="72dp"
+                    android:layout_width="44dp"
                     android:layout_height="match_parent"
-                    android:backgroundTint="@color/control"
-                    android:text="Back"
-                    android:textColor="@color/text_primary" />
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:gravity="center"
+                    android:includeFontPadding="false"
+                    android:minWidth="0dp"
+                    android:minHeight="0dp"
+                    android:padding="0dp"
+                    android:text="←"
+                    android:textColor="@color/text_primary"
+                    android:textSize="22sp" />
 
                 <LinearLayout
                     android:layout_width="0dp"
@@ -509,7 +530,7 @@
                     android:layout_width="44dp"
                     android:layout_height="match_parent"
                     android:layout_marginEnd="6dp"
-                    android:backgroundTint="@color/control"
+                    android:background="?attr/selectableItemBackgroundBorderless"
                     android:minWidth="0dp"
                     android:minHeight="0dp"
                     android:padding="0dp"
@@ -520,25 +541,29 @@
                 <EditText
                     android:id="@+id/messageInput"
                     android:layout_width="0dp"
-                    android:layout_height="match_parent"
+                    android:layout_height="40dp"
+                    android:layout_gravity="center_vertical"
                     android:layout_weight="1"
-                    android:backgroundTint="@color/line"
+                    android:background="@drawable/bg_search_pill"
                     android:hint="Message"
                     android:inputType="textCapSentences|textMultiLine"
                     android:maxLines="2"
+                    android:paddingStart="14dp"
+                    android:paddingEnd="14dp"
                     android:textColor="@color/text_primary"
                     android:textColorHint="@color/text_muted" />
 
                 <Button
                     android:id="@+id/btnSend"
-                    android:layout_width="52dp"
-                    android:layout_height="match_parent"
+                    android:layout_width="44dp"
+                    android:layout_height="44dp"
+                    android:layout_gravity="center_vertical"
                     android:layout_marginStart="8dp"
-                    android:backgroundTint="@color/control"
+                    android:background="@drawable/bg_avatar_circle"
                     android:minWidth="0dp"
                     android:minHeight="0dp"
                     android:padding="0dp"
-                    android:text="^"
+                    android:text="↑"
                     android:textColor="@color/text_primary"
                     android:textSize="20sp" />
             </LinearLayout>
@@ -865,10 +890,10 @@
 
             <EditText
                 android:id="@+id/pinInput"
-                android:layout_width="180dp"
+                android:layout_width="200dp"
                 android:layout_height="52dp"
                 android:layout_marginTop="24dp"
-                android:backgroundTint="@color/line"
+                android:background="@drawable/bg_input_pill"
                 android:gravity="center"
                 android:hint="PIN"
                 android:inputType="numberPassword"
@@ -879,19 +904,20 @@
 
             <Button
                 android:id="@+id/btnUnlock"
-                android:layout_width="180dp"
+                android:layout_width="200dp"
                 android:layout_height="52dp"
                 android:layout_marginTop="16dp"
-                android:backgroundTint="@color/control"
+                android:background="@drawable/bg_action_primary"
                 android:text="Unlock"
-                android:textColor="@color/text_primary" />
+                android:textColor="@color/text_primary"
+                android:textStyle="bold" />
 
             <Button
                 android:id="@+id/btnUseBiometric"
-                android:layout_width="180dp"
+                android:layout_width="200dp"
                 android:layout_height="48dp"
                 android:layout_marginTop="12dp"
-                android:backgroundTint="@color/control"
+                android:background="@drawable/bg_action_neutral"
                 android:text="Use biometric"
                 android:textColor="@color/text_primary"
                 android:visibility="gone" />

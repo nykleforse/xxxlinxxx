@@ -24,8 +24,8 @@ android {
         applicationId = "com.example.xxxlinkxxx"
         minSdk = 23
         targetSdk = 34
-        versionCode = 204
-        versionName = "1.15.4"
+        versionCode = 205
+        versionName = "1.15.5"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
