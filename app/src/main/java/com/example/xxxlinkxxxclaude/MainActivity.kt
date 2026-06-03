@@ -3279,7 +3279,7 @@ class MainActivity : AppCompatActivity() {
      */
     private fun fetchLatestPrerelease(): ReleaseInfo? {
         if (GITHUB_OWNER.isBlank() || GITHUB_REPO.isBlank()) return null
-        val listUrl = "https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/releases?per_page=10"
+        val listUrl = "https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/releases?per_page=20"
         val conn = URL(listUrl).openConnection() as HttpURLConnection
         return try {
             conn.apply {
@@ -3290,15 +3290,20 @@ class MainActivity : AppCompatActivity() {
             }
             val body = conn.inputStream.bufferedReader().use { it.readText() }
             val arr = org.json.JSONArray(body)
-            var result: ReleaseInfo? = null
+            // GitHub returns releases ordered by created_at, but tag age does not
+            // mean newest version (forks/cherry-picks can create older-dated tags
+            // for higher version numbers). Pick the prerelease with the highest
+            // semantic version, not just the first one returned.
+            var best: ReleaseInfo? = null
             for (i in 0 until arr.length()) {
                 val obj = arr.getJSONObject(i)
-                if (obj.optBoolean("prerelease", false)) {
-                    result = parseRelease(obj)
-                    break
+                if (!obj.optBoolean("prerelease", false)) continue
+                val candidate = runCatching { parseRelease(obj) }.getOrNull() ?: continue
+                if (best == null || isNewerVersion(candidate.tagName, best.tagName)) {
+                    best = candidate
                 }
             }
-            result
+            best
         } finally {
             conn.disconnect()
         }
