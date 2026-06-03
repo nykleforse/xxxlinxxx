@@ -157,6 +157,13 @@ class MainActivity : AppCompatActivity() {
     /** Search query for the chat list — empty string disables filtering. */
     private var chatListQuery: String = ""
 
+    // ── In-app incoming-call ringer ───────────────────────────────────────────
+    // When app is foreground the FCM channel notification is suppressed, so the
+    // OS does not play the channel sound. Play the ringtone ourselves on the
+    // RINGTONE audio stream and vibrate. Stopped on accept/decline/cancel.
+    private var incomingRingPlayer: MediaPlayer? = null
+    private var incomingVibrator: android.os.Vibrator? = null
+
     // ── App lock ──────────────────────────────────────────────────────────────
     private var appUnlocked = false
 
@@ -428,6 +435,9 @@ class MainActivity : AppCompatActivity() {
         if (prefs.getBoolean(KEY_APP_LOCK_ENABLED, false)) {
             appUnlocked = false
         }
+        // Stop in-app ringtone — backgrounded app means FCM channel takes over
+        // and would otherwise stack on top of our MediaPlayer.
+        stopIncomingRing()
         super.onStop()
     }
 
@@ -1977,6 +1987,62 @@ class MainActivity : AppCompatActivity() {
 
     private fun cancelIncomingCallNotification() {
         notificationManager().cancel(NOTIFICATION_CALL_ID)
+        stopIncomingRing()
+    }
+
+    private fun startIncomingRing() {
+        // Already ringing — don't double-start (parallel listener fires).
+        if (incomingRingPlayer != null) return
+        runCatching {
+            val uri = Uri.parse("android.resource://$packageName/${R.raw.incoming_call}")
+            val player = MediaPlayer().apply {
+                setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .build()
+                )
+                setDataSource(this@MainActivity, uri)
+                isLooping = true
+                prepare()
+                start()
+            }
+            incomingRingPlayer = player
+        }.onFailure { Log.w("XLINK_RING", "ring start failed: ${it.message}") }
+
+        // Vibrate in parallel — respects user's vibrate-on-ring preference because
+        // we use USAGE_NOTIFICATION_RINGTONE; if ringer is silent, OS skips audio
+        // but vibration still alerts.
+        runCatching {
+            val vib = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val vm = getSystemService(Context.VIBRATOR_MANAGER_SERVICE)
+                    as android.os.VibratorManager
+                vm.defaultVibrator
+            } else {
+                @Suppress("DEPRECATION")
+                getSystemService(Context.VIBRATOR_SERVICE) as android.os.Vibrator
+            }
+            if (vib.hasVibrator()) {
+                val pattern = longArrayOf(0L, 600L, 400L, 600L, 400L, 600L, 1000L)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    vib.vibrate(android.os.VibrationEffect.createWaveform(pattern, 0))
+                } else {
+                    @Suppress("DEPRECATION")
+                    vib.vibrate(pattern, 0)
+                }
+                incomingVibrator = vib
+            }
+        }.onFailure { Log.w("XLINK_RING", "vibrate failed: ${it.message}") }
+    }
+
+    private fun stopIncomingRing() {
+        incomingRingPlayer?.let { p ->
+            runCatching { if (p.isPlaying) p.stop() }
+            runCatching { p.release() }
+        }
+        incomingRingPlayer = null
+        incomingVibrator?.let { runCatching { it.cancel() } }
+        incomingVibrator = null
     }
 
     private fun updateFirebaseControls() {
@@ -2164,6 +2230,10 @@ class MainActivity : AppCompatActivity() {
         binding.status.text = "Incoming call from $callerName"
         binding.chatStatus.text = "Incoming call from $callerName"
         notifyIncomingCall(incoming)
+        // notifyIncomingCall early-returns when appInForeground, so the channel
+        // sound never plays. Drive our own ringtone+vibrate while the incoming
+        // screen is visible. stopIncomingRing() runs via cancelIncomingCallNotification.
+        startIncomingRing()
     }
 
     private fun acceptPendingIncoming() {
@@ -6084,6 +6154,7 @@ class MainActivity : AppCompatActivity() {
         ioScope.cancel()
         messagePollJob = null
         cancelCallTimeout()
+        stopIncomingRing()
         stopAudio()
         removeListeners()
         incomingListener?.remove()
