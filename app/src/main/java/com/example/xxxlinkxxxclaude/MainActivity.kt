@@ -945,18 +945,13 @@ class MainActivity : AppCompatActivity() {
         updateFirebaseControls()
     }
 
-    /** Show/hide the "unsaved contact" banner for the currently open chat. */
+    /** Show/hide the inline "+ Add" pill in the chat top bar for unsaved contacts. */
     private fun updateAddContactBanner(id: String) {
-        // Show banner only when the user has NOT explicitly added this contact.
+        // Show only when the user has NOT explicitly added this contact.
         // rememberContact() adds IDs to savedContactIds without setting contactNameKey —
         // we distinguish by checking whether contactNameKey was explicitly written.
         val explicitlySaved = prefs.contains(contactNameKey(id))
-        if (explicitlySaved) {
-            binding.addContactBanner.visibility = View.GONE
-        } else {
-            binding.bannerContactId.text = "Unknown · $id"
-            binding.addContactBanner.visibility = View.VISIBLE
-        }
+        binding.btnBannerAddContact.visibility = if (explicitlySaved) View.GONE else View.VISIBLE
     }
 
     private fun showAddContactFromBannerDialog(id: String) {

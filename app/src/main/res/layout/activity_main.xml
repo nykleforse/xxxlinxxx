@@ -311,6 +311,25 @@
                         tools:text="4C024A76" />
                 </LinearLayout>
 
+                <!-- Inline "+ Add" pill: appears only when peer is not in saved contacts.
+                     Sits in the top bar so it never collides with the title or other actions. -->
+                <Button
+                    android:id="@+id/btnBannerAddContact"
+                    android:layout_width="wrap_content"
+                    android:layout_height="32dp"
+                    android:layout_gravity="center_vertical"
+                    android:layout_marginStart="6dp"
+                    android:layout_marginEnd="2dp"
+                    android:background="@drawable/bg_add_pill"
+                    android:minWidth="0dp"
+                    android:minHeight="0dp"
+                    android:paddingStart="10dp"
+                    android:paddingEnd="10dp"
+                    android:text="+ Add"
+                    android:textColor="@color/text_primary"
+                    android:textSize="12sp"
+                    android:visibility="gone" />
+
                 <Button
                     android:id="@+id/btnSearch"
                     android:layout_width="44dp"
@@ -334,17 +353,13 @@
                     android:src="@drawable/ic_phone_24" />
             </LinearLayout>
 
-            <!-- Banner: unsaved contact → quick add -->
+            <!-- Legacy banner kept hidden — code references it but no longer renders.
+                 Will remove after all callers migrate. -->
             <LinearLayout
                 android:id="@+id/addContactBanner"
                 android:layout_width="match_parent"
-                android:layout_height="36dp"
-                android:layout_marginTop="6dp"
-                android:background="@color/control"
-                android:gravity="center_vertical"
+                android:layout_height="0dp"
                 android:orientation="horizontal"
-                android:paddingStart="12dp"
-                android:paddingEnd="4dp"
                 android:visibility="gone">
 
                 <TextView
@@ -352,22 +367,7 @@
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:singleLine="true"
-                    android:textColor="@color/text_secondary"
-                    android:textSize="12sp" />
-
-                <Button
-                    android:id="@+id/btnBannerAddContact"
-                    android:layout_width="wrap_content"
-                    android:layout_height="28dp"
-                    android:backgroundTint="@color/oled_black"
-                    android:minWidth="0dp"
-                    android:minHeight="0dp"
-                    android:paddingStart="12dp"
-                    android:paddingEnd="12dp"
-                    android:text="+ Add"
-                    android:textColor="@color/text_primary"
-                    android:textSize="12sp" />
+                    android:visibility="gone" />
             </LinearLayout>
 
             <LinearLayout
