@@ -50,6 +50,7 @@ import com.example.xxxlinkxxx.desktop.net.Repository
 import com.example.xxxlinkxxx.desktop.photo.PhotoTransferController
 import com.example.xxxlinkxxx.desktop.security.BackupCodec
 import com.example.xxxlinkxxx.desktop.security.PinLock
+import com.example.xxxlinkxxx.desktop.security.QuickStart
 import com.example.xxxlinkxxx.desktop.storage.SecurePrefs
 import com.example.xxxlinkxxx.desktop.update.UpdateChecker
 import com.example.xxxlinkxxx.desktop.util.EventLog
@@ -106,6 +107,7 @@ data class ChatMessage(
 // ── App state machine ────────────────────────────────────────────────────────
 
 private sealed interface AppScreen {
+    object Loading : AppScreen
     object Login : AppScreen
     data class Authenticated(
         val repo: Repository,
@@ -123,15 +125,38 @@ private sealed interface AuthedSub {
 
 @Composable
 fun App() {
-    var screen: AppScreen by remember { mutableStateOf<AppScreen>(AppScreen.Login) }
+    var screen: AppScreen by remember { mutableStateOf<AppScreen>(AppScreen.Loading) }
     var status by remember { mutableStateOf("") }
+
+    // Auto-login attempt on first composition. If a quickstart blob is
+    // present and decrypts under the device key, derive the rest of the
+    // session from the stored secrets and skip the photo+password prompt.
+    LaunchedEffect(Unit) {
+        val photoSecret = QuickStart.tryLoad()
+        if (photoSecret == null) {
+            screen = AppScreen.Login
+            return@LaunchedEffect
+        }
+        runCatching { autoLogin(photoSecret) }
+            .onSuccess { (repo, prefs) ->
+                screen = AppScreen.Authenticated(repo, prefs, photoSecret)
+            }
+            .onFailure { e ->
+                EventLog.log("QSTART", "auto-login failed: ${e.message}")
+                status = "Auto-login failed: ${e.message}"
+                screen = AppScreen.Login
+            }
+    }
 
     Box(Modifier.fillMaxSize().background(Bg)) {
         when (val s = screen) {
+            AppScreen.Loading -> LoadingScreen()
             AppScreen.Login -> LoginScreen(
                 status = status,
                 onStatus = { status = it },
                 onAuthenticated = { repo, prefs, photoSecret ->
+                    // Persist for next launch (one-tap auto-login).
+                    runCatching { QuickStart.save(photoSecret) }
                     screen = AppScreen.Authenticated(repo, prefs, photoSecret)
                 }
             )
@@ -140,6 +165,9 @@ fun App() {
                 prefs = s.prefs,
                 photoSecret = s.photoSecret,
                 onLogout = {
+                    // Logout wipes the quickstart blob so next launch
+                    // forces a fresh photo+password challenge.
+                    QuickStart.clear()
                     screen = AppScreen.Login
                     status = "Logged out"
                 }
@@ -147,6 +175,46 @@ fun App() {
         }
     }
 }
+
+@Composable
+private fun LoadingScreen() {
+    Box(
+        Modifier.fillMaxSize().background(Bg),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("XxxLink Desktop", color = TextPrimary, style = Hdr)
+            Spacer(Modifier.height(8.dp))
+            Text("opening session...", color = TextSecondary, style = Sub)
+        }
+    }
+}
+
+/**
+ * Same effect as doLogin() but starts from the stored photo secret. Uses
+ * the secrets already in the encrypted vault — no PBKDF2, no photo bytes.
+ * Fails closed if the vault doesn't open or any of the v2 fields are
+ * missing (forces the caller to fall back to LoginScreen).
+ */
+private suspend fun autoLogin(photoSecret: ByteArray): Pair<Repository, SecurePrefs> =
+    withContext(Dispatchers.IO) {
+        val prefs = SecurePrefs.open(photoSecret)
+        val localId = prefs.getString("local_id")
+            ?: error("vault has no local_id")
+        val cryptoB64 = prefs.getString("v2_crypto_secret")
+            ?: error("vault has no v2_crypto_secret")
+        val keyPair = Crypto.deriveEcKeyPair(Crypto.b64decode(cryptoB64))
+
+        val fb = FirebaseClient(FB_API_KEY, FB_PROJECT_ID)
+        fb.signInAnonymously()
+        val repo = Repository(fb, keyPair, localId)
+        runCatching { repo.bindLocalIdOnServer() }
+            .onFailure { EventLog.log("AUTH", "bindLocalId (auto) warn: ${it.message}") }
+        runCatching { repo.publishPublicMessageKey() }
+            .onFailure { EventLog.log("AUTH", "publish key (auto) warn: ${it.message}") }
+        EventLog.log("AUTH", "auto-login complete as $localId")
+        repo to prefs
+    }
 
 // ── Login (photo + password → derive identity → bind → publish pubkey) ───────
 
