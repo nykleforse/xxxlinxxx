@@ -24,8 +24,8 @@ android {
         applicationId = "com.example.xxxlinkxxx"
         minSdk = 23
         targetSdk = 34
-        versionCode = 161
-        versionName = "1.14.21-beta"
+        versionCode = 162
+        versionName = "1.14.22-beta"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
@@ -51,11 +51,11 @@ android {
 
     buildTypes {
         getByName("release") {
-            // R8 minify + shrinkResources for smaller APK + harder reverse
-            // engineering. WebRTC / Codec2 JNI / Firebase / Coroutines / Biometric
-            // keep-rules live in proguard-rules.pro.
-            isMinifyEnabled = true
-            isShrinkResources = true
+            // R8 disabled in v1.14.22 — minified build crashed in
+            // org.webrtc.NativeLibrary$DefaultLoader.load. Existing keep-rules
+            // weren't enough; needs deeper investigation before re-enabling.
+            isMinifyEnabled = false
+            isShrinkResources = false
             if (projectDebugKeystore.exists()) {
                 signingConfig = signingConfigs.getByName("debug")
             }
