@@ -185,6 +185,65 @@ service cloud.firestore {
       allow delete: if isShortId(resource.data.to);
     }
 
+    match /transfers/{transferId} {
+      allow get, list: if true;
+
+      allow create: if request.resource.data.keys().hasOnly([
+            'transferId',
+            'senderId',
+            'receiverId',
+            'offer',
+            'state',
+            'createdAt'
+          ]) &&
+        request.resource.data.transferId == transferId &&
+        isNonEmptyString(request.resource.data.transferId, 128) &&
+        isShortId(request.resource.data.senderId) &&
+        isShortId(request.resource.data.receiverId) &&
+        request.resource.data.senderId != request.resource.data.receiverId &&
+        isNonEmptyString(request.resource.data.offer, 327680) &&
+        request.resource.data.state == 'pending' &&
+        isClientMillis(request.resource.data.createdAt);
+
+      allow update: if resource.data.transferId == transferId &&
+        request.resource.data.transferId == resource.data.transferId &&
+        request.resource.data.senderId == resource.data.senderId &&
+        request.resource.data.receiverId == resource.data.receiverId &&
+        request.resource.data.offer == resource.data.offer &&
+        request.resource.data.createdAt == resource.data.createdAt &&
+        request.resource.data.keys().hasOnly([
+          'transferId',
+          'senderId',
+          'receiverId',
+          'offer',
+          'state',
+          'createdAt',
+          'answer'
+        ]) &&
+        request.resource.data.state in ['pending', 'accepted', 'done'] &&
+        isOptionalString('answer', 327680);
+
+      allow delete: if false;
+
+      match /candidates/{candidateId} {
+        allow get, list: if true;
+
+        allow create: if request.resource.data.keys().hasOnly([
+            'sender',
+            'sdpMid',
+            'sdpMLineIndex',
+            'candidate'
+          ]) &&
+          isShortId(request.resource.data.sender) &&
+          isOptionalString('sdpMid', 64) &&
+          request.resource.data.sdpMLineIndex is int &&
+          request.resource.data.sdpMLineIndex >= 0 &&
+          isNonEmptyString(request.resource.data.candidate, 4096);
+
+        allow update, delete: if false;
+      }
+    }
+
     match /{document=**} {
       allow read, write: if false;
     }
