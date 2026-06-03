@@ -13,6 +13,13 @@ buildscript {
     }
 }
 
+// Compose Multiplatform plugin classpath for the :desktop module.
+// Declared with apply false so :app doesn't pull it in. Version pinned
+// to a build compatible with Kotlin 1.9.23.
+plugins {
+    id("org.jetbrains.compose") version "1.6.11" apply false
+}
+
 // Опционально: если gradle ругается на project repositories,
 // можно добавить безопасное управление репозиториями в settings.gradle.kts.
 // Здесь ничего больше не нужно.
