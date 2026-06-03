@@ -252,8 +252,7 @@ class MainActivity : AppCompatActivity() {
     ) { uri ->
         uri?.let {
             pendingRestoreUri = it
-            Toast.makeText(this, "Now select your login photo", Toast.LENGTH_LONG).show()
-            backupRestorePhotoLauncher.launch("image/*")
+            promptRestoreCredential()
         }
     }
 
@@ -4298,12 +4297,100 @@ class MainActivity : AppCompatActivity() {
 
     private fun exportBackupWithPhotoKey() {
         val secretB64 = prefs.getString(KEY_PHOTO_ACCOUNT_SECRET, null)
-        if (secretB64 == null) {
-            Toast.makeText(this, "Log in with your photo first", Toast.LENGTH_LONG).show()
+        if (secretB64 != null) {
+            // Have the photo-derived secret — use it (canonical path).
+            pendingBackupPhotoSecret = b64decode(secretB64)
+            backupFileLauncher.launch("xlink_backup_${System.currentTimeMillis()}.xlinkbak")
             return
         }
-        pendingBackupPhotoSecret = b64decode(secretB64)
-        backupFileLauncher.launch("xlink_backup_${System.currentTimeMillis()}.xlinkbak")
+        // Fallback: derive a backup key from a user-supplied password so the
+        // user doesn't have to re-do the photo+password login flow just to
+        // export. On restore, the same password is required.
+        promptBackupPasswordAndExport()
+    }
+
+    private fun promptRestoreCredential() {
+        AlertDialog.Builder(this)
+            .setTitle("Restore backup")
+            .setMessage("Was this backup exported with a photo login or with a backup password?")
+            .setPositiveButton("Password") { _, _ -> promptRestorePasswordAndImport() }
+            .setNegativeButton("Photo") { _, _ ->
+                Toast.makeText(this, "Now select your login photo", Toast.LENGTH_LONG).show()
+                backupRestorePhotoLauncher.launch("image/*")
+            }
+            .setNeutralButton("Cancel") { _, _ -> pendingRestoreUri = null }
+            .setCancelable(false)
+            .show()
+    }
+
+    private fun promptRestorePasswordAndImport() {
+        val restoreUri = pendingRestoreUri ?: return
+        val input = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            hint = "Backup password"
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Backup password")
+            .setView(input)
+            .setPositiveButton("Restore") { _, _ ->
+                val pwd = input.text.toString()
+                if (pwd.isEmpty()) {
+                    Toast.makeText(this, "Password required", Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+                pendingRestoreUri = null
+                ioScope.launch {
+                    val secret = derivePasswordBackupSecret(pwd)
+                    doImportBackup(restoreUri, secret)
+                }
+            }
+            .setNegativeButton("Cancel") { _, _ -> pendingRestoreUri = null }
+            .show()
+    }
+
+    private fun promptBackupPasswordAndExport() {
+        val input = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            hint = "Backup password (remember it!)"
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Backup password")
+            .setMessage("This password protects the backup file. You will need to enter it on restore. Photo login is not required.")
+            .setView(input)
+            .setPositiveButton("Export") { _, _ ->
+                val pwd = input.text.toString()
+                if (pwd.length < 6) {
+                    Toast.makeText(this, "Password must be at least 6 characters", Toast.LENGTH_LONG).show()
+                    return@setPositiveButton
+                }
+                ioScope.launch {
+                    val secret = derivePasswordBackupSecret(pwd)
+                    runOnUiThread {
+                        pendingBackupPhotoSecret = secret
+                        backupFileLauncher.launch("xlink_backup_${System.currentTimeMillis()}.xlinkbak")
+                    }
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /**
+     * PBKDF2-derive a 32-byte backup key from a user-typed password salted by
+     * the device's localId. Same KDF profile as the photo-account secret so a
+     * password-derived backup is interchangeable with a photo-derived one on
+     * the import path (which already accepts any 32-byte secret).
+     */
+    private fun derivePasswordBackupSecret(password: String): ByteArray {
+        val salt = "$PHOTO_ACCOUNT_KEY_SALT:$localId".toByteArray(Charsets.UTF_8)
+        val spec = javax.crypto.spec.PBEKeySpec(
+            password.toCharArray(),
+            salt,
+            V2_PBKDF2_ITERS,
+            256
+        )
+        val skf = javax.crypto.SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+        return skf.generateSecret(spec).encoded
     }
 
     private fun buildBackupJson(): String {
