@@ -116,6 +116,17 @@ New features:
 - *Photo transfer now uses the same STUN/TURN server set as calls for more reliable connection setup.*
 - *Temporary WebRTC disconnections no longer immediately abort an active photo transfer.*
 
+Version v1.15.20-beta
+
+New features:
+
+- *Android `versionName` updated to `1.15.20`.*
+- *Android `versionCode` increased to `220` for installing this build over earlier 1.15.x builds.*
+- *Photo WebRTC setup now skips TURN servers when TURN credentials are missing instead of passing invalid servers into the peer connection.*
+- *Photo transfer now uses a lighter dedicated ICE configuration and retries with STUN-only setup if the primary photo peer connection cannot be created.*
+- *Failed photo setup now stops the send chain cleanly and marks the local pending photo as failed instead of continuing in a broken state.*
+- *Stale photo peer connections are cleared before a new photo transfer starts.*
+
 Next versions:
 
 - Add a new version chapter below this one.

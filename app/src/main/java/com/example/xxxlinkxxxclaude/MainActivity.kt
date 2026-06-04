@@ -761,17 +761,43 @@ class MainActivity : AppCompatActivity() {
             .createPeerConnectionFactory()
     }
 
-    private fun defaultIceServers(): List<PeerConnection.IceServer> = listOf(
+    private fun stunIceServers(): List<PeerConnection.IceServer> = listOf(
         PeerConnection.IceServer.builder("stun:stun.relay.metered.ca:80").createIceServer(),
-        meteredTurnServer("turn:global.relay.metered.ca:80"),
-        meteredTurnServer("turn:global.relay.metered.ca:80?transport=tcp"),
-        meteredTurnServer("turn:global.relay.metered.ca:443"),
-        meteredTurnServer("turns:global.relay.metered.ca:443?transport=tcp"),
         PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
         PeerConnection.IceServer.builder("stun:stun1.l.google.com:19302").createIceServer(),
         PeerConnection.IceServer.builder("stun:stun2.l.google.com:19302").createIceServer(),
         PeerConnection.IceServer.builder("stun:stun3.l.google.com:19302").createIceServer()
     )
+
+    private fun meteredTurnServers(vararg urls: String): List<PeerConnection.IceServer> {
+        if (BuildConfig.TURN_USERNAME.isBlank() || BuildConfig.TURN_PASSWORD.isBlank()) {
+            return emptyList()
+        }
+        return urls.map { meteredTurnServer(it) }
+    }
+
+    private fun defaultIceServers(): List<PeerConnection.IceServer> =
+        listOf(PeerConnection.IceServer.builder("stun:stun.relay.metered.ca:80").createIceServer()) +
+            meteredTurnServers(
+                "turn:global.relay.metered.ca:80",
+                "turn:global.relay.metered.ca:80?transport=tcp",
+                "turn:global.relay.metered.ca:443",
+                "turns:global.relay.metered.ca:443?transport=tcp"
+            ) +
+            listOf(
+                PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
+                PeerConnection.IceServer.builder("stun:stun1.l.google.com:19302").createIceServer(),
+                PeerConnection.IceServer.builder("stun:stun2.l.google.com:19302").createIceServer(),
+                PeerConnection.IceServer.builder("stun:stun3.l.google.com:19302").createIceServer()
+            )
+
+    private fun photoIceServers(): List<PeerConnection.IceServer> =
+        listOf(PeerConnection.IceServer.builder("stun:stun.relay.metered.ca:80").createIceServer()) +
+            meteredTurnServers(
+                "turn:global.relay.metered.ca:80",
+                "turn:global.relay.metered.ca:443"
+            ) +
+            listOf(PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer())
 
     private fun initPeerConnection(createLocalChannels: Boolean) {
         val firestore = db
@@ -876,6 +902,33 @@ class MainActivity : AppCompatActivity() {
             .setUsername(BuildConfig.TURN_USERNAME)
             .setPassword(BuildConfig.TURN_PASSWORD)
             .createIceServer()
+
+    private fun createPhotoPeerConnection(
+        label: String,
+        observer: PeerConnection.Observer
+    ): PeerConnection? {
+        val primaryConfig = PeerConnection.RTCConfiguration(photoIceServers()).apply {
+            continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
+        }
+        val primary = runCatching {
+            peerFactory.createPeerConnection(primaryConfig, observer)
+        }.getOrElse { e ->
+            Log.w(TAG, "$label: primary photo PeerConnection threw: ${e.message}")
+            null
+        }
+        if (primary != null) return primary
+
+        Log.w(TAG, "$label: primary photo PeerConnection returned null, retrying with STUN-only config")
+        val fallbackConfig = PeerConnection.RTCConfiguration(stunIceServers()).apply {
+            continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
+        }
+        return runCatching {
+            peerFactory.createPeerConnection(fallbackConfig, observer)
+        }.getOrElse { e ->
+            Log.w(TAG, "$label: fallback photo PeerConnection threw: ${e.message}")
+            null
+        }
+    }
 
     private fun showMyQrCode() {
         if (localId.isBlank()) return
@@ -4906,6 +4959,11 @@ class MainActivity : AppCompatActivity() {
             encrypted.copyOfRange(i, minOf(i + chunkSize, encrypted.size))
         }
 
+        if (photoTransferPc != null || photoTransferDc != null) {
+            Log.w(TAG, "XLINK_PHOTO clearing stale photo peer before starting a new transfer")
+            cleanupPhotoTransfer()
+        }
+
         val transferId = "$localId-photo-${System.currentTimeMillis()}"
         outgoingPhotoTransferId = transferId
         outgoingPhotoChatId = chatId
@@ -4927,7 +4985,11 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        runOnUiThread { setupPhotoTransferPc(chatId) }
+        val setupOk = withContext(Dispatchers.Main) { setupPhotoTransferPc(chatId) }
+        if (!setupOk) {
+            runOnUiThread { rewriteChatLogPhotoEntry(chatId, transferId, success = false) }
+            return
+        }
         android.os.Handler(mainLooper).postDelayed({
             photoTransferPc?.createOffer(object : SdpObserverAdapter() {
                 override fun onCreateSuccess(desc: SessionDescription?) {
@@ -4970,12 +5032,8 @@ class MainActivity : AppCompatActivity() {
         }, 200)
     }
 
-    private fun setupPhotoTransferPc(chatId: String) {
-        val config = PeerConnection.RTCConfiguration(defaultIceServers()).apply {
-            continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
-            iceCandidatePoolSize = 4
-        }
-        photoTransferPc = peerFactory.createPeerConnection(config, object : PeerConnection.Observer {
+    private fun setupPhotoTransferPc(chatId: String): Boolean {
+        val observer = object : PeerConnection.Observer {
             override fun onDataChannel(dc: DataChannel) {
                 photoTransferDc = dc
                 setupPhotoReceiveChannel(dc)
@@ -5010,15 +5068,22 @@ class MainActivity : AppCompatActivity() {
             override fun onRemoveStream(p0: MediaStream?) {}
             override fun onAddTrack(p0: RtpReceiver?, p1: Array<out MediaStream>?) {}
             override fun onRenegotiationNeeded() {}
-        }) ?: run {
+        }
+        photoTransferPc = createPhotoPeerConnection("setupPhotoTransferPc", observer) ?: run {
             Log.e(TAG, "setupPhotoTransferPc: createPeerConnection returned null")
             runOnUiThread { Toast.makeText(this, "Photo connection setup failed", Toast.LENGTH_SHORT).show() }
-            return
+            return false
         }
 
         val dcInit = DataChannel.Init().apply { ordered = true }
-        val safePc = photoTransferPc ?: return  // already null-guarded above, but avoid !!
-        photoTransferDc = safePc.createDataChannel("photo", dcInit)
+        val safePc = photoTransferPc ?: return false  // already null-guarded above, but avoid !!
+        photoTransferDc = safePc.createDataChannel("photo", dcInit) ?: run {
+            Log.e(TAG, "setupPhotoTransferPc: createDataChannel(photo) returned null")
+            runOnUiThread { Toast.makeText(this, "Photo channel setup failed", Toast.LENGTH_SHORT).show() }
+            cleanupPhotoTransfer()
+            return false
+        }
+        return true
     }
 
     private fun listenPhotoTransferAnswer(
@@ -5388,7 +5453,13 @@ class MainActivity : AppCompatActivity() {
         armReceiveWatchdog()
 
         runOnUiThread {
-            setupPhotoTransferPcReceiver(transferId)
+            if (!setupPhotoTransferPcReceiver(transferId)) {
+                firestore.collection("transfers").document(docId)
+                    .update("state", "failed")
+                    .addOnFailureListener { e -> Log.w(TAG, "photo receiver setup failed state write failed: ${e.message}") }
+                cleanupPhotoTransfer()
+                return@runOnUiThread
+            }
             photoTransferPc?.setRemoteDescription(object : SdpObserverAdapter() {
                 override fun onSetSuccess() {
                     photoTransferPc?.createAnswer(object : SdpObserverAdapter() {
@@ -5425,12 +5496,8 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun setupPhotoTransferPcReceiver(transferId: String) {
-        val config = PeerConnection.RTCConfiguration(defaultIceServers()).apply {
-            continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
-            iceCandidatePoolSize = 4
-        }
-        photoTransferPc = peerFactory.createPeerConnection(config, object : PeerConnection.Observer {
+    private fun setupPhotoTransferPcReceiver(transferId: String): Boolean {
+        val observer = object : PeerConnection.Observer {
             override fun onDataChannel(dc: DataChannel) {
                 photoTransferDc = dc
                 setupPhotoReceiveChannel(dc)
@@ -5464,11 +5531,13 @@ class MainActivity : AppCompatActivity() {
             override fun onRemoveStream(p0: MediaStream?) {}
             override fun onAddTrack(p0: RtpReceiver?, p1: Array<out MediaStream>?) {}
             override fun onRenegotiationNeeded() {}
-        }) ?: run {
+        }
+        photoTransferPc = createPhotoPeerConnection("setupPhotoTransferPcReceiver", observer) ?: run {
             Log.e(TAG, "setupPhotoTransferPcReceiver: createPeerConnection returned null")
             runOnUiThread { Toast.makeText(this, "Photo connection setup failed", Toast.LENGTH_SHORT).show() }
-            return
+            return false
         }
+        return true
     }
 
     private fun setupPhotoReceiveChannel(dc: DataChannel) {
