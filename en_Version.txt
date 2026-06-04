@@ -105,6 +105,17 @@ New features:
 - *Direct photo transfer now auto-accepts photos from saved contacts and existing chats instead of leaving them stuck behind an unknown-sender prompt.*
 - *Photo transfer state handling now allows failed, expired, rejected, and busy states so stalled transfers can be reported and cleaned up correctly.*
 
+Version v1.15.19-beta
+
+New features:
+
+- *Android `versionName` updated to `1.15.19`.*
+- *Android `versionCode` increased to `219` for installing this build over earlier 1.15.x builds.*
+- *Direct photo transfer now waits for a receiver confirmation before marking a photo as delivered.*
+- *The receiver now sends `PHO_ACK` only after the photo is saved locally, and sends `PHO_NACK` if the transfer is incomplete, cannot be decrypted, or cannot be saved.*
+- *Photo transfer now uses the same STUN/TURN server set as calls for more reliable connection setup.*
+- *Temporary WebRTC disconnections no longer immediately abort an active photo transfer.*
+
 Next versions:
 
 - Add a new version chapter below this one.

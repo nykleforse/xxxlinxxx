@@ -199,6 +199,7 @@ class MainActivity : AppCompatActivity() {
     private val photoTransferListeners = mutableListOf<ListenerRegistration>()
     // Guard against double-send (observer + polling both triggering sendPhotoOverChannel)
     @Volatile private var photoSendInProgress = false
+    @Volatile private var outgoingPhotoCompletionHandled = false
 
     // Incoming assembly
     private var assemblingTransferId: String? = null
@@ -760,20 +761,21 @@ class MainActivity : AppCompatActivity() {
             .createPeerConnectionFactory()
     }
 
+    private fun defaultIceServers(): List<PeerConnection.IceServer> = listOf(
+        PeerConnection.IceServer.builder("stun:stun.relay.metered.ca:80").createIceServer(),
+        meteredTurnServer("turn:global.relay.metered.ca:80"),
+        meteredTurnServer("turn:global.relay.metered.ca:80?transport=tcp"),
+        meteredTurnServer("turn:global.relay.metered.ca:443"),
+        meteredTurnServer("turns:global.relay.metered.ca:443?transport=tcp"),
+        PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
+        PeerConnection.IceServer.builder("stun:stun1.l.google.com:19302").createIceServer(),
+        PeerConnection.IceServer.builder("stun:stun2.l.google.com:19302").createIceServer(),
+        PeerConnection.IceServer.builder("stun:stun3.l.google.com:19302").createIceServer()
+    )
+
     private fun initPeerConnection(createLocalChannels: Boolean) {
         val firestore = db
-        val servers = listOf(
-            PeerConnection.IceServer.builder("stun:stun.relay.metered.ca:80").createIceServer(),
-            meteredTurnServer("turn:global.relay.metered.ca:80"),
-            meteredTurnServer("turn:global.relay.metered.ca:80?transport=tcp"),
-            meteredTurnServer("turn:global.relay.metered.ca:443"),
-            meteredTurnServer("turns:global.relay.metered.ca:443?transport=tcp"),
-            PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
-            PeerConnection.IceServer.builder("stun:stun1.l.google.com:19302").createIceServer(),
-            PeerConnection.IceServer.builder("stun:stun2.l.google.com:19302").createIceServer(),
-            PeerConnection.IceServer.builder("stun:stun3.l.google.com:19302").createIceServer()
-        )
-        val rtcConfig = PeerConnection.RTCConfiguration(servers).apply {
+        val rtcConfig = PeerConnection.RTCConfiguration(defaultIceServers()).apply {
             continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
             iceCandidatePoolSize = 4
         }
@@ -4907,6 +4909,7 @@ class MainActivity : AppCompatActivity() {
         val transferId = "$localId-photo-${System.currentTimeMillis()}"
         outgoingPhotoTransferId = transferId
         outgoingPhotoChatId = chatId
+        outgoingPhotoCompletionHandled = false
 
         // Save photo locally for sender's chat view. Render as PENDING — the
         // bubble is rewritten to [PHOTO:..] on success or [PHOTO_FAILED:..] on abort.
@@ -4968,14 +4971,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupPhotoTransferPc(chatId: String) {
-        val servers = listOf(
-            PeerConnection.IceServer.builder("stun:stun.relay.metered.ca:80").createIceServer(),
-            meteredTurnServer("turn:global.relay.metered.ca:80"),
-            meteredTurnServer("turn:global.relay.metered.ca:443"),
-            PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer()
-        )
-        val config = PeerConnection.RTCConfiguration(servers).apply {
+        val config = PeerConnection.RTCConfiguration(defaultIceServers()).apply {
             continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
+            iceCandidatePoolSize = 4
         }
         photoTransferPc = peerFactory.createPeerConnection(config, object : PeerConnection.Observer {
             override fun onDataChannel(dc: DataChannel) {
@@ -4996,7 +4994,7 @@ class MainActivity : AppCompatActivity() {
             }
             override fun onConnectionChange(state: PeerConnection.PeerConnectionState?) {
                 if (state == PeerConnection.PeerConnectionState.FAILED ||
-                    state == PeerConnection.PeerConnectionState.DISCONNECTED) {
+                    state == PeerConnection.PeerConnectionState.CLOSED) {
                     runOnUiThread {
                         Toast.makeText(this@MainActivity, "Photo transfer connection lost", Toast.LENGTH_SHORT).show()
                         cleanupPhotoTransfer()
@@ -5170,10 +5168,64 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
-            override fun onMessage(buffer: DataChannel.Buffer) {}
+            override fun onMessage(buffer: DataChannel.Buffer) {
+                val bytes = ByteArray(buffer.data.remaining()).also { buffer.data.get(it) }
+                val packet = bytes.toString(Charsets.UTF_8)
+                runOnUiThread { handleOutgoingPhotoControlPacket(packet, transferId, chatId) }
+            }
             override fun onBufferedAmountChange(p0: Long) {}
         })
         android.os.Handler(mainLooper).postDelayed({ tryOpen() }, 1000)
+    }
+
+    private fun handleOutgoingPhotoControlPacket(packet: String, transferId: String, chatId: String) {
+        when {
+            packet == "PHO_ACK|$transferId" -> {
+                completeOutgoingPhotoTransfer(
+                    chatId = chatId,
+                    transferId = transferId,
+                    success = true,
+                    toast = "Photo received"
+                )
+            }
+            packet.startsWith("PHO_NACK|$transferId") -> {
+                completeOutgoingPhotoTransfer(
+                    chatId = chatId,
+                    transferId = transferId,
+                    success = false,
+                    toast = "Photo was not received"
+                )
+            }
+        }
+    }
+
+    private fun completeOutgoingPhotoTransfer(
+        chatId: String,
+        transferId: String,
+        success: Boolean,
+        toast: String
+    ) {
+        val shouldComplete = synchronized(photoTransferLock) {
+            if (outgoingPhotoTransferId != transferId || outgoingPhotoCompletionHandled) {
+                false
+            } else {
+                outgoingPhotoCompletionHandled = true
+                true
+            }
+        }
+        if (!shouldComplete) return
+
+        runOnUiThread {
+            Toast.makeText(this@MainActivity, toast, Toast.LENGTH_SHORT).show()
+            rewriteChatLogPhotoEntry(chatId, transferId, success)
+        }
+
+        db?.collection("transfers")?.document(transferId)?.update(
+            "state",
+            if (success) "done" else "failed"
+        )?.addOnFailureListener { e -> Log.w(TAG, "photo transfer final state update failed: ${e.message}") }
+
+        cleanupPhotoTransfer()
     }
 
     private fun sendPhotoOverChannel(
@@ -5199,13 +5251,17 @@ class MainActivity : AppCompatActivity() {
                 sendPhotoPacket(dc, "PHO_END|$transferId")
 
                 runOnUiThread {
-                    Toast.makeText(this@MainActivity, "Photo sent!", Toast.LENGTH_SHORT).show()
-                    rewriteChatLogPhotoEntry(chatId, transferId, success = true)
+                    Toast.makeText(this@MainActivity, "Photo sent, waiting for receipt", Toast.LENGTH_SHORT).show()
                 }
 
-                db?.collection("transfers")?.document(transferId)?.update("state", "done")
-                    ?.addOnFailureListener { e -> Log.w(TAG, "photo transfer done update failed: ${e.message}") }
-                cleanupPhotoTransfer()
+                android.os.Handler(mainLooper).postDelayed({
+                    completeOutgoingPhotoTransfer(
+                        chatId = chatId,
+                        transferId = transferId,
+                        success = false,
+                        toast = "Photo was not confirmed"
+                    )
+                }, PHOTO_DELIVERY_ACK_TIMEOUT_MS)
 
             } catch (e: Exception) {
                 // Send an explicit abort packet so receiver tears down immediately
@@ -5214,13 +5270,12 @@ class MainActivity : AppCompatActivity() {
                     java.nio.ByteBuffer.wrap("PHO_ABORT|$transferId".toByteArray(Charsets.UTF_8)),
                     false
                 )) }
-                runOnUiThread {
-                    Toast.makeText(this@MainActivity, "Photo send error: ${e.message}", Toast.LENGTH_SHORT).show()
-                    rewriteChatLogPhotoEntry(chatId, transferId, success = false)
-                }
-                db?.collection("transfers")?.document(transferId)?.update("state", "failed")
-                    ?.addOnFailureListener { _ -> /* best-effort */ }
-                cleanupPhotoTransfer()
+                completeOutgoingPhotoTransfer(
+                    chatId = chatId,
+                    transferId = transferId,
+                    success = false,
+                    toast = "Photo send error: ${e.message}"
+                )
             }
         }
     }
@@ -5371,14 +5426,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupPhotoTransferPcReceiver(transferId: String) {
-        val servers = listOf(
-            PeerConnection.IceServer.builder("stun:stun.relay.metered.ca:80").createIceServer(),
-            meteredTurnServer("turn:global.relay.metered.ca:80"),
-            meteredTurnServer("turn:global.relay.metered.ca:443"),
-            PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer()
-        )
-        val config = PeerConnection.RTCConfiguration(servers).apply {
+        val config = PeerConnection.RTCConfiguration(defaultIceServers()).apply {
             continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
+            iceCandidatePoolSize = 4
         }
         photoTransferPc = peerFactory.createPeerConnection(config, object : PeerConnection.Observer {
             override fun onDataChannel(dc: DataChannel) {
@@ -5398,7 +5448,7 @@ class MainActivity : AppCompatActivity() {
             }
             override fun onConnectionChange(state: PeerConnection.PeerConnectionState?) {
                 if (state == PeerConnection.PeerConnectionState.FAILED ||
-                    state == PeerConnection.PeerConnectionState.DISCONNECTED) {
+                    state == PeerConnection.PeerConnectionState.CLOSED) {
                     runOnUiThread {
                         Toast.makeText(this@MainActivity, "Photo transfer connection lost", Toast.LENGTH_SHORT).show()
                         cleanupPhotoTransfer()
@@ -5434,6 +5484,21 @@ class MainActivity : AppCompatActivity() {
             override fun onStateChange() {}
             override fun onBufferedAmountChange(p0: Long) {}
         })
+    }
+
+    private fun sendPhotoControlPacket(packet: String) {
+        val dc = photoTransferDc ?: return
+        if (dc.state() != DataChannel.State.OPEN) return
+        runCatching {
+            dc.send(
+                DataChannel.Buffer(
+                    java.nio.ByteBuffer.wrap(packet.toByteArray(Charsets.UTF_8)),
+                    false
+                )
+            )
+        }.onFailure { e ->
+            Log.w(TAG, "photo control packet send failed: ${e.message}")
+        }
     }
 
     private fun handlePhotoPacket(packet: String) {
@@ -5542,6 +5607,7 @@ class MainActivity : AppCompatActivity() {
                             "Photo transfer incomplete ($assemblingReceived/${assemblingExpected} chunks)",
                             Toast.LENGTH_SHORT).show()
                     }
+                    sendPhotoControlPacket("PHO_NACK|$transferId|incomplete")
                     cleanupPhotoTransfer()
                     resetAssembly()
                     return
@@ -5563,25 +5629,39 @@ class MainActivity : AppCompatActivity() {
                     cipher.doFinal(encryptedBytes)
                 }.getOrElse { e ->
                     runOnUiThread { Toast.makeText(this, "Photo decrypt failed: ${e.message}", Toast.LENGTH_SHORT).show() }
+                    sendPhotoControlPacket("PHO_NACK|$transferId|decrypt_failed")
                     cleanupPhotoTransfer()
                     resetAssembly()
                     return
                 }
 
                 ioScope.launch {
+                    try {
                     val photoDir = File(filesDir, "photos/$chatId").also { it.mkdirs() }
                     val dest = File(photoDir, "$transferId.jpg")
                     dest.writeBytes(photoBytes)
                     val path = dest.absolutePath
+                    sendPhotoControlPacket("PHO_ACK|$transferId")
                     runOnUiThread {
                         appendMessage(chatId, contactName(chatId), "[PHOTO:$path]")
                         notifyIncomingMessage(chatId, "📷 Photo")
                         Toast.makeText(this@MainActivity, "Photo received", Toast.LENGTH_SHORT).show()
                     }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "photo save failed: ${e.message}")
+                        sendPhotoControlPacket("PHO_NACK|$transferId|save_failed")
+                        runOnUiThread {
+                            Toast.makeText(this@MainActivity, "Photo save failed", Toast.LENGTH_SHORT).show()
+                        }
+                    } finally {
+                        runOnUiThread {
+                            cleanupPhotoTransfer()
+                            resetAssembly()
+                        }
+                    }
                 }
 
-                cleanupPhotoTransfer()
-                resetAssembly()
+                return
             }
         }
     }
@@ -5678,6 +5758,7 @@ class MainActivity : AppCompatActivity() {
             outgoingPhotoTransferId = null
             outgoingPhotoChatId = null
             photoSendInProgress = false
+            outgoingPhotoCompletionHandled = false
             resetAssembly()
         }
     }
@@ -6380,6 +6461,7 @@ class MainActivity : AppCompatActivity() {
         // 'pending'. After this, the sender gives up so its photoTransferPc
         // doesn't deadlock subsequent incoming offers as busy.
         private const val PHOTO_ANSWER_TIMEOUT_MS = 60_000L
+        private const val PHOTO_DELIVERY_ACK_TIMEOUT_MS = 60_000L
         /** Receive-side inactivity timeout. Resets on every PHO_CHUNK. */
         private const val PHOTO_RECEIVE_TIMEOUT_MS = 90_000L
         private const val KEY_APP_PIN_SALT = "app_pin_salt"
