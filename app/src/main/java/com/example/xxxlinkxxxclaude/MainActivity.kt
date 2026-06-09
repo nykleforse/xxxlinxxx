@@ -5832,6 +5832,11 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Full-screen photo viewer. Matches the drawer dark theme: black background,
+     * pill-shaped action buttons (Save · Share · Close) in a row at the bottom.
+     * Tap on the image toggles the action bar. Long-press opens an options menu.
+     */
     private fun showFullScreenPhoto(path: String) {
         val file = File(path)
         if (!file.exists()) {
@@ -5839,18 +5844,170 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val bmp = BitmapFactory.decodeFile(path) ?: return
-        val iv = ImageView(this).apply {
-            setImageBitmap(bmp)
-            scaleType = ImageView.ScaleType.FIT_CENTER
+        val dp = resources.displayMetrics.density
+
+        val root = android.widget.FrameLayout(this).apply {
+            setBackgroundColor(0xFF000000.toInt())
             layoutParams = android.view.ViewGroup.LayoutParams(
                 android.view.ViewGroup.LayoutParams.MATCH_PARENT,
                 android.view.ViewGroup.LayoutParams.MATCH_PARENT
             )
         }
-        AlertDialog.Builder(this)
-            .setView(iv)
-            .setPositiveButton("Close", null)
-            .show()
+        val image = ImageView(this).apply {
+            setImageBitmap(bmp)
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            adjustViewBounds = true
+            layoutParams = android.widget.FrameLayout.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        }
+        root.addView(image)
+
+        val actionBar = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER
+            val pad = (12 * dp).toInt()
+            setPadding(pad, pad, pad, pad)
+            layoutParams = android.widget.FrameLayout.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
+                android.view.Gravity.BOTTOM
+            )
+            setBackgroundColor(0xCC000000.toInt())
+        }
+
+        val dialog = AlertDialog.Builder(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
+            .setView(root)
+            .create()
+
+        fun pillButton(label: String, primary: Boolean, onClick: () -> Unit): android.widget.TextView {
+            return android.widget.TextView(this).apply {
+                text = label
+                textSize = 14f
+                setTextColor(0xFFFFFFFF.toInt())
+                gravity = android.view.Gravity.CENTER
+                background = ContextCompat.getDrawable(
+                    this@MainActivity,
+                    if (primary) R.drawable.bg_action_primary else R.drawable.bg_action_neutral
+                )
+                val padH = (18 * dp).toInt()
+                val padV = (10 * dp).toInt()
+                setPadding(padH, padV, padH, padV)
+                isClickable = true
+                isFocusable = true
+                setOnClickListener { onClick() }
+            }
+        }
+
+        val saveBtn = pillButton("💾 Save", primary = true) {
+            savePhotoToGallery(file)
+        }
+        val shareBtn = pillButton("↗ Share", primary = false) {
+            sharePhotoFile(file)
+        }
+        val closeBtn = pillButton("✕ Close", primary = false) {
+            dialog.dismiss()
+        }
+        val gap = (8 * dp).toInt()
+        actionBar.addView(saveBtn, android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = gap })
+        actionBar.addView(shareBtn, android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = gap })
+        actionBar.addView(closeBtn, android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        root.addView(actionBar)
+
+        // Tap image -> hide/show action bar for distraction-free view.
+        image.setOnClickListener {
+            actionBar.visibility =
+                if (actionBar.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+        }
+        // Long press -> options menu (same set; convenient when bar hidden).
+        image.setOnLongClickListener {
+            AlertDialog.Builder(this)
+                .setItems(arrayOf("Save to gallery", "Share", "Close")) { _, i ->
+                    when (i) {
+                        0 -> savePhotoToGallery(file)
+                        1 -> sharePhotoFile(file)
+                        2 -> dialog.dismiss()
+                    }
+                }
+                .show()
+            true
+        }
+
+        dialog.window?.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(0xFF000000.toInt()))
+        dialog.show()
+    }
+
+    /**
+     * Drop the photo into the device's Pictures/X-link bucket so it shows up
+     * in the gallery. Uses MediaStore on API 29+ (no permission needed under
+     * scoped storage); falls back to public ExternalStorage on pre-Q which is
+     * gated by the maxSdkVersion=28 WRITE_EXTERNAL_STORAGE permission in the
+     * manifest.
+     */
+    private fun savePhotoToGallery(src: File) {
+        val name = "xlink_${System.currentTimeMillis()}.jpg"
+        ioScope.launch {
+            val ok = runCatching {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    val values = android.content.ContentValues().apply {
+                        put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, name)
+                        put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                        put(android.provider.MediaStore.Images.Media.RELATIVE_PATH,
+                            "${android.os.Environment.DIRECTORY_PICTURES}/X-link")
+                        put(android.provider.MediaStore.Images.Media.IS_PENDING, 1)
+                    }
+                    val resolver = contentResolver
+                    val uri = resolver.insert(
+                        android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values
+                    ) ?: error("MediaStore insert returned null")
+                    resolver.openOutputStream(uri)?.use { out ->
+                        src.inputStream().use { it.copyTo(out) }
+                    } ?: error("Cannot open output stream")
+                    values.clear()
+                    values.put(android.provider.MediaStore.Images.Media.IS_PENDING, 0)
+                    resolver.update(uri, values, null, null)
+                } else {
+                    @Suppress("DEPRECATION")
+                    val dir = File(
+                        android.os.Environment.getExternalStoragePublicDirectory(
+                            android.os.Environment.DIRECTORY_PICTURES
+                        ),
+                        "X-link"
+                    )
+                    if (!dir.exists()) dir.mkdirs()
+                    val dst = File(dir, name)
+                    src.copyTo(dst, overwrite = false)
+                    // Notify gallery
+                    sendBroadcast(android.content.Intent(
+                        android.content.Intent.ACTION_MEDIA_SCANNER_SCAN_FILE,
+                        android.net.Uri.fromFile(dst)
+                    ))
+                }
+            }.isSuccess
+            runOnUiThread {
+                Toast.makeText(
+                    this@MainActivity,
+                    if (ok) "Saved to gallery" else "Save failed",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+    }
+
+    private fun sharePhotoFile(src: File) {
+        val uri = runCatching {
+            FileProvider.getUriForFile(this, "$packageName.fileprovider", src)
+        }.getOrNull() ?: run {
+            Toast.makeText(this, "Cannot share this file", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+            type = "image/jpeg"
+            putExtra(android.content.Intent.EXTRA_STREAM, uri)
+            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        startActivity(android.content.Intent.createChooser(intent, "Share photo"))
     }
 
     // ─── End Photo Transfer ───────────────────────────────────────────────────

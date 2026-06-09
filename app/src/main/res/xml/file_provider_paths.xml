@@ -3,4 +3,6 @@
     <external-files-path name="updates" path="updates/"/>
     <files-path name="updates_internal" path="updates/"/>
     <files-path name="beta_logs" path="beta_logs/"/>
+    <!-- Received/sent photos so the share intent can hand them to other apps. -->
+    <files-path name="photos" path="photos/"/>
 </paths>
