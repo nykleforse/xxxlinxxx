@@ -5835,7 +5835,9 @@ class MainActivity : AppCompatActivity() {
     /**
      * Full-screen photo viewer. Matches the drawer dark theme: black background,
      * pill-shaped action buttons (Save · Share · Close) in a row at the bottom.
-     * Tap on the image toggles the action bar. Long-press opens an options menu.
+     * The image supports pinch-to-zoom, double-tap zoom, and one-finger pan
+     * via matrix transforms on a custom ZoomableImageView. Uses a plain Dialog
+     * (not AlertDialog) so the system insets don't push the image up.
      */
     private fun showFullScreenPhoto(path: String) {
         val file = File(path)
@@ -5853,10 +5855,8 @@ class MainActivity : AppCompatActivity() {
                 android.view.ViewGroup.LayoutParams.MATCH_PARENT
             )
         }
-        val image = ImageView(this).apply {
+        val image = ZoomableImageView(this).apply {
             setImageBitmap(bmp)
-            scaleType = ImageView.ScaleType.FIT_CENTER
-            adjustViewBounds = true
             layoutParams = android.widget.FrameLayout.LayoutParams(
                 android.view.ViewGroup.LayoutParams.MATCH_PARENT,
                 android.view.ViewGroup.LayoutParams.MATCH_PARENT
@@ -5877,9 +5877,7 @@ class MainActivity : AppCompatActivity() {
             setBackgroundColor(0xCC000000.toInt())
         }
 
-        val dialog = AlertDialog.Builder(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
-            .setView(root)
-            .create()
+        val dialog = android.app.Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
 
         fun pillButton(label: String, primary: Boolean, onClick: () -> Unit): android.widget.TextView {
             return android.widget.TextView(this).apply {
@@ -5915,13 +5913,13 @@ class MainActivity : AppCompatActivity() {
         actionBar.addView(closeBtn, android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         root.addView(actionBar)
 
-        // Tap image -> hide/show action bar for distraction-free view.
-        image.setOnClickListener {
+        // Single tap (without zoom gesture) -> toggle action bar. The
+        // ZoomableImageView forwards single-tap-confirmed up through GestureDetector.
+        image.onSingleTapUp = {
             actionBar.visibility =
                 if (actionBar.visibility == View.VISIBLE) View.GONE else View.VISIBLE
         }
-        // Long press -> options menu (same set; convenient when bar hidden).
-        image.setOnLongClickListener {
+        image.onLongPress = {
             AlertDialog.Builder(this)
                 .setItems(arrayOf("Save to gallery", "Share", "Close")) { _, i ->
                     when (i) {
@@ -5931,11 +5929,170 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 .show()
-            true
         }
 
-        dialog.window?.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(0xFF000000.toInt()))
+        dialog.setContentView(root)
+        dialog.window?.apply {
+            setBackgroundDrawable(android.graphics.drawable.ColorDrawable(0xFF000000.toInt()))
+            setLayout(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        }
         dialog.show()
+    }
+
+    /**
+     * ImageView subclass that supports pinch-to-zoom, double-tap zoom toggle
+     * and one-finger pan via Matrix transforms. Initial fit is FIT_CENTER
+     * (handled by computeBaseMatrix on the first layout pass), so the image
+     * appears centered in the viewport — unlike AlertDialog's default which
+     * pushes content to the top of the dialog frame.
+     */
+    private inner class ZoomableImageView(ctx: Context) : ImageView(ctx) {
+        private val MODE_NONE = 0
+        private val MODE_DRAG = 1
+        private val MODE_ZOOM = 2
+
+        private val matrixCurr = android.graphics.Matrix()
+        private val matrixSaved = android.graphics.Matrix()
+        private var scaleFactor = 1f
+        private val minScale = 1f
+        private val maxScale = 6f
+        private var lastTouchX = 0f
+        private var lastTouchY = 0f
+        private var mode = MODE_NONE
+        private var baseConfigured = false
+
+        var onSingleTapUp: (() -> Unit)? = null
+        var onLongPress: (() -> Unit)? = null
+
+        private val scaleDetector = android.view.ScaleGestureDetector(ctx,
+            object : android.view.ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                override fun onScale(detector: android.view.ScaleGestureDetector): Boolean {
+                    val newScale = (scaleFactor * detector.scaleFactor)
+                        .coerceIn(minScale, maxScale)
+                    val factor = newScale / scaleFactor
+                    scaleFactor = newScale
+                    matrixCurr.postScale(factor, factor, detector.focusX, detector.focusY)
+                    clampMatrix()
+                    imageMatrix = matrixCurr
+                    return true
+                }
+            })
+
+        private val gestureDetector = android.view.GestureDetector(ctx,
+            object : android.view.GestureDetector.SimpleOnGestureListener() {
+                override fun onSingleTapConfirmed(e: android.view.MotionEvent): Boolean {
+                    onSingleTapUp?.invoke()
+                    return true
+                }
+                override fun onDoubleTap(e: android.view.MotionEvent): Boolean {
+                    val targetScale = if (scaleFactor > 1.05f) minScale else 2.5f
+                    val factor = targetScale / scaleFactor
+                    scaleFactor = targetScale
+                    matrixCurr.postScale(factor, factor, e.x, e.y)
+                    clampMatrix()
+                    imageMatrix = matrixCurr
+                    return true
+                }
+                override fun onLongPress(e: android.view.MotionEvent) {
+                    onLongPress?.invoke()
+                }
+            })
+
+        init {
+            scaleType = ScaleType.MATRIX
+            isClickable = true
+            isFocusable = true
+        }
+
+        override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+            super.onSizeChanged(w, h, oldw, oldh)
+            baseConfigured = false
+            configureBaseMatrix()
+        }
+
+        override fun setImageBitmap(bm: android.graphics.Bitmap?) {
+            super.setImageBitmap(bm)
+            baseConfigured = false
+            if (width > 0 && height > 0) configureBaseMatrix()
+        }
+
+        private fun configureBaseMatrix() {
+            val drawable = drawable ?: return
+            val dW = drawable.intrinsicWidth.toFloat()
+            val dH = drawable.intrinsicHeight.toFloat()
+            if (dW <= 0f || dH <= 0f || width <= 0 || height <= 0) return
+            val scale = minOf(width / dW, height / dH)
+            val tx = (width - dW * scale) / 2f
+            val ty = (height - dH * scale) / 2f
+            matrixCurr.reset()
+            matrixCurr.postScale(scale, scale)
+            matrixCurr.postTranslate(tx, ty)
+            scaleFactor = 1f
+            imageMatrix = matrixCurr
+            baseConfigured = true
+        }
+
+        private fun clampMatrix() {
+            // Re-center single axis if image is smaller than viewport on that axis.
+            val vals = FloatArray(9)
+            matrixCurr.getValues(vals)
+            val curScale = vals[android.graphics.Matrix.MSCALE_X]
+            val drawable = drawable ?: return
+            val w = drawable.intrinsicWidth * curScale
+            val h = drawable.intrinsicHeight * curScale
+            var dx = 0f
+            var dy = 0f
+            val tx = vals[android.graphics.Matrix.MTRANS_X]
+            val ty = vals[android.graphics.Matrix.MTRANS_Y]
+            if (w < width) {
+                dx = (width - w) / 2f - tx
+            } else {
+                if (tx > 0f) dx = -tx
+                else if (tx + w < width) dx = width - (tx + w)
+            }
+            if (h < height) {
+                dy = (height - h) / 2f - ty
+            } else {
+                if (ty > 0f) dy = -ty
+                else if (ty + h < height) dy = height - (ty + h)
+            }
+            if (dx != 0f || dy != 0f) matrixCurr.postTranslate(dx, dy)
+        }
+
+        override fun onTouchEvent(event: android.view.MotionEvent): Boolean {
+            scaleDetector.onTouchEvent(event)
+            gestureDetector.onTouchEvent(event)
+            when (event.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    matrixSaved.set(matrixCurr)
+                    lastTouchX = event.x
+                    lastTouchY = event.y
+                    mode = MODE_DRAG
+                }
+                android.view.MotionEvent.ACTION_POINTER_DOWN -> {
+                    mode = MODE_ZOOM
+                }
+                android.view.MotionEvent.ACTION_MOVE -> {
+                    if (mode == MODE_DRAG && !scaleDetector.isInProgress) {
+                        val dx = event.x - lastTouchX
+                        val dy = event.y - lastTouchY
+                        matrixCurr.postTranslate(dx, dy)
+                        clampMatrix()
+                        imageMatrix = matrixCurr
+                        lastTouchX = event.x
+                        lastTouchY = event.y
+                    }
+                }
+                android.view.MotionEvent.ACTION_UP,
+                android.view.MotionEvent.ACTION_POINTER_UP -> {
+                    mode = MODE_NONE
+                }
+            }
+            return true
+        }
     }
 
     /**
