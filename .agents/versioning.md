@@ -34,7 +34,7 @@ Use this agent when a task touches:
   - Russian: `- *Новая функция.*`
 - Add new chapters below existing chapters.
 - Use the same GitHub release tag in both files.
-- The version source is GitHub Releases: https://github.com/nykleforse/xxxlinxxx/releases.
+- The version source is GitHub Releases: https://github.com/nykleforse/xlink-android/releases.
 - For beta work, use the newest prerelease tag unless the user names another tag.
 - Do not invent calendar-based versions for APK work.
 - If the user gives no version number and the task is not tied to a GitHub release, ask Liaison to clarify.

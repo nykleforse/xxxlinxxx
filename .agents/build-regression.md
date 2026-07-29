@@ -20,7 +20,7 @@ Use this agent after implementation tasks and before Overseer acceptance when co
 - Do not re-review product decisions unless the build output reveals a problem.
 - If Java/JDK is unavailable, stop after reporting the exact blocker.
 - Do not create or rebuild APK files unless the user explicitly requested an APK in the current request.
-- APK version source is GitHub Releases: https://github.com/nykleforse/xxxlinxxx/releases.
+- APK version source is GitHub Releases: https://github.com/nykleforse/xlink-android/releases.
 - Before APK work, check the relevant GitHub release tag. For beta work use the newest prerelease tag unless the user names another tag.
 - Name and number builds from release tags, for example `v1.12` -> Android `versionName` `1.12-beta` and a monotonically higher `versionCode`.
 - Do not invent calendar-based APK versions such as `2.01.06.26`.

@@ -6885,7 +6885,7 @@ class MainActivity : AppCompatActivity() {
         // Set these after creating your GitHub repository.
         // Releases must have an .apk file as a release asset.
         private const val GITHUB_OWNER = "nykleforse"
-        private const val GITHUB_REPO  = "xxxlinxxx"
+        private const val GITHUB_REPO  = "xlink-android"
         private const val GITHUB_API   =
             "https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/releases/latest"
         // v4: bumped from v3 because sound URIs changed when the raw resources
