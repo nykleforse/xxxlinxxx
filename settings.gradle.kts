@@ -22,5 +22,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "xxxlinkxxxclaude"
+rootProject.name = "xlink-android"
 include(":app")

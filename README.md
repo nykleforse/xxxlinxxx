@@ -52,8 +52,7 @@ P2P encrypted voice + messaging for Android. Calls travel over WebRTC; messages 
 ```
 app/                                 Android module
 ├── src/main/java/
-│   ├── com/example/p2pcodec2/         FCM, foreground service, Codec2 bridge
-│   └── com/example/xxxlinkxxxclaude/  MainActivity + UI flows
+│   └── com/example/p2pcodec2/         All Kotlin sources (MainActivity, FCM, foreground service, Codec2 bridge)
 ├── src/main/cpp/                      codec2 native + JNI shim
 └── src/main/res/                      layouts, drawables, raw sounds
 functions/                          Cloud Functions (bindLocalId, FCM dispatch)

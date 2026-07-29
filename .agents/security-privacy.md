@@ -8,8 +8,8 @@ The Security & Privacy Agent checks encryption, key handling, private data flow,
 
 Primary files:
 
-- `app/src/main/java/com/example/xxxlinkxxxclaude/MainActivity.kt`
-- `app/src/main/java/com/example/xxxlinkxxxclaude/DirectPhotoTransfer.kt`
+- `app/src/main/java/com/example/p2pcodec2/MainActivity.kt`
+- `app/src/main/java/com/example/p2pcodec2/DirectPhotoTransfer.kt`
 - `app/src/main/java/com/example/p2pcodec2/XxxFirebaseMessagingService.kt`
 - `functions/index.js`
 - `firestore.rules`

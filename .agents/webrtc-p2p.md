@@ -8,8 +8,8 @@ The WebRTC P2P Agent owns peer connections, DataChannels, call signaling integra
 
 Primary files:
 
-- `app/src/main/java/com/example/xxxlinkxxxclaude/MainActivity.kt`
-- `app/src/main/java/com/example/xxxlinkxxxclaude/DirectPhotoTransfer.kt`
+- `app/src/main/java/com/example/p2pcodec2/MainActivity.kt`
+- `app/src/main/java/com/example/p2pcodec2/DirectPhotoTransfer.kt`
 - `firestore.rules` only for signaling-related fields.
 
 Use this agent when a task touches:

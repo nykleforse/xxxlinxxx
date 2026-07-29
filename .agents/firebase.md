@@ -10,7 +10,7 @@ Primary files:
 
 - `firestore.rules`
 - `functions/index.js`
-- `app/src/main/java/com/example/xxxlinkxxxclaude/MainActivity.kt`
+- `app/src/main/java/com/example/p2pcodec2/MainActivity.kt`
 - `app/src/main/java/com/example/p2pcodec2/XxxFirebaseMessagingService.kt`
 - `app/google-services.json` only for presence/config awareness, not editing secrets.
 

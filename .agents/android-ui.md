@@ -8,7 +8,7 @@ The Android UI Agent owns Android screens, view binding, notification UI behavio
 
 Primary files:
 
-- `app/src/main/java/com/example/xxxlinkxxxclaude/MainActivity.kt`
+- `app/src/main/java/com/example/p2pcodec2/MainActivity.kt`
 - `app/src/main/res/layout/activity_main.xml`
 - `app/src/main/res/drawable/`
 - `app/src/main/res/values/`

@@ -20,8 +20,8 @@ The Director coordinates project work. It does not blindly accept completed patc
 
 ## Project Map
 
-- Main Android app: `app/src/main/java/com/example/xxxlinkxxxclaude/MainActivity.kt`.
-- Direct P2P photo transfer: `app/src/main/java/com/example/xxxlinkxxxclaude/DirectPhotoTransfer.kt`.
+- Main Android app: `app/src/main/java/com/example/p2pcodec2/MainActivity.kt`.
+- Direct P2P photo transfer: `app/src/main/java/com/example/p2pcodec2/DirectPhotoTransfer.kt`.
 - Push service: `app/src/main/java/com/example/p2pcodec2/XxxFirebaseMessagingService.kt`.
 - Layout: `app/src/main/res/layout/activity_main.xml`.
 - Drawable assets: `app/src/main/res/drawable/`.

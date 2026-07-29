@@ -47,7 +47,7 @@ Do not skip Liaison or Director unless the request is a tiny direct question or 
 
 This is an Android messenger with:
 
-- Kotlin Android UI in `app/src/main/java/com/example/xxxlinkxxxclaude/MainActivity.kt`.
+- Kotlin Android UI in `app/src/main/java/com/example/p2pcodec2/MainActivity.kt`.
 - Firebase Firestore and FCM integration.
 - WebRTC peer connections and DataChannels.
 - A native Codec2 bridge under `app/src/main/cpp`.

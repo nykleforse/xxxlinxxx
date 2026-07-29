@@ -1,0 +1,9 @@
+# Vendored third-party source.
+#
+# Codec2 ships ~6.5 MB of C, plus MATLAB scripts and LaTeX docs. GitHub's language
+# bar counts bytes, so without this the repo is reported as C 84.9% / MATLAB 5.7%
+# and Kotlin 4.2% — which reads as a C project rather than the Android app it is.
+#
+# Our own JNI bridge (app/src/main/cpp/codec2_bridge.cpp) and the top-level
+# CMakeLists.txt are deliberately NOT listed here: they are ours and should count.
+app/src/main/cpp/codec2/** linguist-vendored
