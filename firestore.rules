@@ -75,7 +75,8 @@ service cloud.firestore {
     }
 
     match /messages/{messageId} {
-      allow get, list: if true;
+      allow get, list: if hasLocalIdClaim() &&
+        localIdClaim() == resource.data.to;
 
       allow create: if request.resource.data.keys().hasOnly([
           'from',
@@ -103,9 +104,9 @@ service cloud.firestore {
         (!hasLocalIdClaim() || localIdClaim() == request.resource.data.from);
 
       allow update: if false;
-      allow delete: if resource.data.keys().hasAll(['to']) &&
-        isShortId(resource.data.to) &&
-        (!hasLocalIdClaim() || localIdClaim() == resource.data.to);
+      // Retained inbox cleanup is performed by the Admin SDK scheduled function.
+      // Clients cannot consume/delete a message before another device sees it.
+      allow delete: if false;
     }
 
     match /calls/{callId} {

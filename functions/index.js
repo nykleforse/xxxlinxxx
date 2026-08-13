@@ -1,4 +1,5 @@
 const {onDocumentCreated, onDocumentWritten} = require("firebase-functions/v2/firestore");
+const {onSchedule} = require("firebase-functions/v2/scheduler");
 const {onCall, HttpsError} = require("firebase-functions/v2/https");
 const {initializeApp} = require("firebase-admin/app");
 const {getFirestore, FieldValue} = require("firebase-admin/firestore");
@@ -170,8 +171,29 @@ exports.notifyMessageCreated = onDocumentCreated("messages/{messageId}", async (
     type: "message",
     messageId: event.params.messageId,
     senderId: from,
+    groupId: message.groupId || "",
     body: "Encrypted message",
   });
+});
+
+// Retain encrypted inbox documents long enough for every bound device to save
+// them locally. Clients never consume/delete another device's copy.
+exports.cleanupExpiredMessages = onSchedule({
+  schedule: "every 24 hours",
+  region: "us-central1",
+}, async () => {
+  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  while (true) {
+    const snapshot = await db.collection("messages")
+        .where("createdAt", "<", cutoff)
+        .limit(500)
+        .get();
+    if (snapshot.empty) return;
+    const batch = db.batch();
+    snapshot.docs.forEach((doc) => batch.delete(doc.ref));
+    await batch.commit();
+    if (snapshot.size < 500) return;
+  }
 });
 
 exports.notifyIncomingCall = onDocumentWritten("calls/{callId}", async (event) => {

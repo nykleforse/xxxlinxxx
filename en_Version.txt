@@ -127,6 +127,17 @@ New features:
 - *Failed photo setup now stops the send chain cleanly and marks the local pending photo as failed instead of continuing in a broken state.*
 - *Stale photo peer connections are cleared before a new photo transfer starts.*
 
+Version v2.0.4-beta
+
+New features and fixes:
+
+- *Android `versionName` updated to `2.0.4-beta` and `versionCode` increased to `2004`.*
+- *Group notifications now open the correct group chat; direct notifications still open the sender chat.*
+- *Notification taps load the exact message immediately, while a realtime inbox listener delivers later messages without the old polling delay.*
+- *Messages are retained when another device receives them first or when decryption/local saving fails, so delivery can retry instead of losing the message.*
+- *Delivered and read states are sent only after the encrypted message is durably saved in the local chat history.*
+- *The encrypted inbox is readable only by its recipient and is cleaned up server-side after seven days.*
+
 Next versions:
 
 - Add a new version chapter below this one.

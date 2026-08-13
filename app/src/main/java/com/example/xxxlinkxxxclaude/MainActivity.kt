@@ -87,6 +87,25 @@ import kotlin.math.absoluteValue
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 
+internal fun canonicalCloudMessageId(documentId: String, localId: String, groupId: String?): String =
+    if (groupId.isNullOrBlank()) documentId else documentId.removeSuffix("-$localId")
+
+internal fun shouldProcessRetainedMessage(isPersistedLocally: Boolean): Boolean =
+    !isPersistedLocally
+
+internal fun shouldAcknowledgeCloudMessage(localPersistenceSucceeded: Boolean): Boolean =
+    localPersistenceSucceeded
+
+internal class InFlightMessageDeduplicator {
+    private val ids = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    fun tryStart(id: String): Boolean = ids.add(id)
+
+    fun finish(id: String) {
+        ids.remove(id)
+    }
+}
+
 class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private var db: FirebaseFirestore? = null
@@ -99,6 +118,7 @@ class MainActivity : AppCompatActivity() {
     private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val listeners = mutableListOf<ListenerRegistration>()
     private var incomingListener: ListenerRegistration? = null
+    private var messageInboxListener: ListenerRegistration? = null
     private var messagePollJob: Job? = null
     private var callTimerJob: Job? = null
     private var callTimeoutJob: Job? = null
@@ -145,6 +165,7 @@ class MainActivity : AppCompatActivity() {
     private val incomingMsgIds  = java.util.concurrent.ConcurrentHashMap<String, MutableList<String>>()
     private val pendingCloudReadReceipts = java.util.concurrent.ConcurrentHashMap<String, MutableSet<String>>()
     private val receivedMessageIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+    private val processingCloudMessages = InFlightMessageDeduplicator()
     private val messageSeqCounter = AtomicInteger(0)
     private var coreStarted = false
     private var currentVoiceMode = VoiceMode.COMFY
@@ -393,6 +414,8 @@ class MainActivity : AppCompatActivity() {
         removeListeners()
         incomingListener?.remove()
         incomingListener = null
+        messageInboxListener?.remove()
+        messageInboxListener = null
         incomingTransferListener?.remove()
         incomingTransferListener = null
         cleanupPhotoTransfer()
@@ -428,6 +451,10 @@ class MainActivity : AppCompatActivity() {
         intent.getStringExtra("openChatId")?.takeIf { it.isNotBlank() }?.let { id ->
             if (!isGroup(id) && id !in savedContactIds()) rememberContact(id)
             openChat(id)
+        }
+        intent.getStringExtra("messageId")?.takeIf { it.isNotBlank() }?.let { id ->
+            fetchCloudMessage(id)
+            intent.removeExtra("messageId")
         }
     }
 
@@ -582,6 +609,11 @@ class MainActivity : AppCompatActivity() {
                 com.google.firebase.auth.FirebaseAuth.getInstance().currentUser
                     ?.getIdToken(true)?.await()
                 localIdBound = true
+                // Reattach after claim refresh if the first receiver-scoped listener
+                // was rejected while bindLocalId was still in flight.
+                if (coreStarted) {
+                    withContext(Dispatchers.Main) { startMessagePolling() }
+                }
             }.onFailure { e ->
                 Log.w(TAG, "bindLocalId failed: ${e.message}")
             }
@@ -620,6 +652,10 @@ class MainActivity : AppCompatActivity() {
             if (!isGroup(id) && id !in savedContactIds()) rememberContact(id)
             openChat(id)
             intent.removeExtra("openChatId")
+        }
+        intent?.getStringExtra("messageId")?.takeIf { it.isNotBlank() }?.let { id ->
+            fetchCloudMessage(id)
+            intent.removeExtra("messageId")
         }
         // Silent background update check — shows dialog only if update found
         ioScope.launch {
@@ -2014,13 +2050,14 @@ class MainActivity : AppCompatActivity() {
     private fun notificationManager(): NotificationManager =
         getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
-    private fun contentIntent(): PendingIntent {
+    private fun contentIntent(openChatId: String? = null): PendingIntent {
         val intent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            if (!openChatId.isNullOrBlank()) putExtra("openChatId", openChatId)
         }
         val flags = PendingIntent.FLAG_UPDATE_CURRENT or
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
-        return PendingIntent.getActivity(this, 0, intent, flags)
+        return PendingIntent.getActivity(this, openChatId?.hashCode() ?: 0, intent, flags)
     }
 
     private fun notifyIncomingCall(incoming: IncomingCall) {
@@ -2047,7 +2084,10 @@ class MainActivity : AppCompatActivity() {
         notificationManager().notify(NOTIFICATION_CALL_ID, notification)
     }
 
-    private fun notifyIncomingMessage(senderId: String, text: String) {
+    /** Local notifications are only for direct P2P text/photo delivery.
+     * Cloud messages are owned by FCM so the two paths cannot overwrite each other.
+     */
+    private fun notifyIncomingMessage(chatId: String, text: String) {
         if (appInForeground || !hasNotificationPermission()) return
         // Single source of truth: SharedPreferences. The in-memory mirror
         // diverged from the FCM-service-incremented value, causing wrong
@@ -2055,10 +2095,10 @@ class MainActivity : AppCompatActivity() {
         val count = prefs.getInt(KEY_UNREAD_NOTIFICATION_COUNT, 0) + 1
         prefs.edit().putInt(KEY_UNREAD_NOTIFICATION_COUNT, count).apply()
         unreadNotificationCount = count
-        val senderName = contactName(senderId)
+        val title = if (isGroup(chatId)) groupName(chatId) else contactName(chatId)
         val notification = NotificationCompat.Builder(this, NOTIFICATION_MESSAGES_CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle(senderName)
+            .setContentTitle(title)
             .setContentText(text)
             .setStyle(NotificationCompat.BigTextStyle().bigText(text))
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
@@ -2068,10 +2108,10 @@ class MainActivity : AppCompatActivity() {
             .setSound(notificationSound(R.raw.incoming_message))
             .setBadgeIconType(NotificationCompat.BADGE_ICON_SMALL)
             .setNumber(count)
-            .setContentIntent(contentIntent())
+            .setContentIntent(contentIntent(chatId))
             .setAutoCancel(true)
             .build()
-        notificationManager().notify((NOTIFICATION_MESSAGE_ID_BASE + senderId.hashCode()).absoluteValue, notification)
+        notificationManager().notify((NOTIFICATION_MESSAGE_ID_BASE + chatId.hashCode()).absoluteValue, notification)
     }
 
     private fun clearNotificationBadges() {
@@ -2671,12 +2711,27 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startMessagePolling() {
+        messageInboxListener?.remove()
+        messageInboxListener = db?.collection("messages")
+            ?.whereEqualTo("to", localId)
+            ?.addSnapshotListener { snapshot, error ->
+                if (error != null) {
+                    updateDebugStatus("message listener failed: ${error.message}")
+                    return@addSnapshotListener
+                }
+                snapshot?.documentChanges?.forEach { change ->
+                    if (change.type != com.google.firebase.firestore.DocumentChange.Type.REMOVED) {
+                        processCloudMessage(change.document)
+                    }
+                }
+            }
+
         messagePollJob?.cancel()
         messagePollJob = ioScope.launch {
             var tick = 0
+            pollReceipts()
             while (isActive) {
                 delay(MESSAGE_POLL_MS)
-                pollCloudMessages()
                 pollReceipts()
                 // Prune stale DELIVERED-only receipts once per hour (720 ticks @ 5s)
                 if (++tick % 720 == 0) pruneOldReceipts()
@@ -2684,43 +2739,29 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun pollCloudMessages() {
+    private fun fetchCloudMessage(messageId: String) {
         val firestore = db ?: return
-        firestore.collection("messages")
-            .whereEqualTo("to", localId)
-            .limit(50)
-            .get()
-            .addOnSuccessListener { snap ->
-                snap.documents.forEach { processCloudMessage(it) }
+        firestore.collection("messages").document(messageId).get()
+            .addOnSuccessListener { document ->
+                if (document.exists() && document.getString("to") == localId) {
+                    processCloudMessage(document)
+                }
             }
             .addOnFailureListener { error ->
-                updateDebugStatus("message poll failed: ${error.message}")
+                updateDebugStatus("message fetch failed: ${error.message}")
             }
     }
 
     private fun processCloudMessage(document: DocumentSnapshot) {
         val id = document.id
-        val senderId = document.getString("from") ?: return
-        if (senderId == localId) return
-        val text = decryptCloudMessage(document)?.takeIf { it.isNotBlank() } ?: return
-
-        val isNew = synchronized(receivedMessageIds) {
-            receivedMessageIds.add(id)
-        }
-        if (!isNew) {
-            deleteCloudMessage(document)
+        if (!processingCloudMessages.tryStart(id)) return
+        val senderId = document.getString("from") ?: run {
+            processingCloudMessages.finish(id)
             return
         }
-
-        markMessageSeen(id)
-
-        // Write delivery receipt to Firestore so sender gets ✓✓
-        db?.collection("receipts")?.document(id)?.set(
-            mapOf("from" to localId, "to" to senderId,
-                  "delivered" to true, "read" to false,
-                  "createdAt" to System.currentTimeMillis())
-        )?.addOnFailureListener { e ->
-            Log.w(TAG, "delivery receipt write failed msgId=$id err=${e.message}")
+        if (senderId == localId) {
+            processingCloudMessages.finish(id)
+            return
         }
 
         // Optional group routing + reply linking.
@@ -2736,28 +2777,50 @@ class MainActivity : AppCompatActivity() {
         // msgId of the fan-out is "{baseMsgId}-{recipient}" so strip the
         // recipient suffix to get the canonical sender-issued id when in group
         // context — keeps reply lookups and dedup consistent across recipients.
-        val canonicalMsgId = if (groupId != null) {
-            id.removeSuffix("-$localId")
-        } else id
+        val canonicalMsgId = canonicalCloudMessageId(id, localId, groupId)
         val chatId = groupId ?: senderId
+        val isPersistedLocally = splitLogLines(messageLogFor(chatId).toString())
+            .any { lineMsgId(it) == canonicalMsgId }
+        if (!shouldProcessRetainedMessage(isPersistedLocally)) {
+            processingCloudMessages.finish(id)
+            return
+        }
+
+        val text = decryptCloudMessage(document)?.takeIf { it.isNotBlank() } ?: run {
+            processingCloudMessages.finish(id)
+            return
+        }
 
         runOnUiThread {
-            if (groupId == null) rememberContact(senderId)
-            // Persist the reply link locally so the bubble can render its preview.
-            if (replyTo != null) {
-                prefs.edit().putString("$KEY_REPLY_PREFIX$canonicalMsgId", replyTo).apply()
+            try {
+                if (groupId == null) rememberContact(senderId)
+                if (replyTo != null) {
+                    prefs.edit().putString("$KEY_REPLY_PREFIX$canonicalMsgId", replyTo).apply()
+                }
+                val persisted = appendMessage(chatId, contactName(senderId), text, canonicalMsgId,
+                    replyToMsgId = replyTo, requireCommit = true)
+                if (!shouldAcknowledgeCloudMessage(persisted)) {
+                    updateDebugStatus("message save failed: $id")
+                    return@runOnUiThread
+                }
+                markMessageSeen(id)
+                db?.collection("receipts")?.document(id)?.set(
+                    mapOf("from" to localId, "to" to senderId,
+                          "delivered" to true, "read" to false,
+                          "createdAt" to System.currentTimeMillis())
+                )?.addOnFailureListener { e ->
+                    Log.w(TAG, "delivery receipt write failed msgId=$id err=${e.message}")
+                }
+                binding.status.text = "Message from ${contactName(senderId)}"
+                if (remoteId == chatId && binding.chatScreen.visibility == View.VISIBLE) {
+                    binding.chatStatus.text = "Message from ${contactName(senderId)}"
+                    sendCloudReadReceipt(id, senderId)
+                } else {
+                    pendingCloudReadReceipts.getOrPut(chatId) { mutableSetOf() }.add(id)
+                }
+            } finally {
+                processingCloudMessages.finish(id)
             }
-            val author = if (groupId != null) contactName(senderId) else contactName(senderId)
-            appendMessage(chatId, author, text, canonicalMsgId, replyToMsgId = replyTo)
-            notifyIncomingMessage(chatId, text)
-            binding.status.text = "Message from ${contactName(senderId)}"
-            if (remoteId == chatId && binding.chatScreen.visibility == View.VISIBLE) {
-                binding.chatStatus.text = "Message from ${contactName(senderId)}"
-                sendCloudReadReceipt(id, senderId)
-            } else {
-                pendingCloudReadReceipts.getOrPut(senderId) { mutableSetOf() }.add(id)
-            }
-            deleteCloudMessage(document)
         }
     }
 
@@ -2840,10 +2903,6 @@ class MainActivity : AppCompatActivity() {
             decryptMessage(encryptedKey, iv, cipherText, keyAlgorithm)
         }.getOrElse { error ->
             updateDebugStatus("decrypt failed: ${error.message}")
-            // Don't delete if keypair isn't loaded yet — transient, message still recoverable
-            if (error.message != "EC keypair not loaded") {
-                deleteCloudMessage(document)
-            }
             null
         }
     }
@@ -2899,13 +2958,6 @@ class MainActivity : AppCompatActivity() {
         val cipher = Cipher.getInstance(AES_MESSAGE_ALGORITHM)
         cipher.init(Cipher.DECRYPT_MODE, aesKey, GCMParameterSpec(AES_GCM_TAG_BITS, b64decode(ivB64)))
         return String(cipher.doFinal(b64decode(cipherTextB64)), Charsets.UTF_8)
-    }
-
-    private fun deleteCloudMessage(document: DocumentSnapshot) {
-        document.reference.delete()
-            .addOnFailureListener { error ->
-                updateDebugStatus("message delete failed: ${error.message}")
-            }
     }
 
     private fun b64(bytes: ByteArray): String =
@@ -3084,17 +3136,18 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun appendMessage(chatId: String, author: String, text: String, msgId: String? = null,
-                                replyToMsgId: String? = null) {
+                                replyToMsgId: String? = null, requireCommit: Boolean = false): Boolean {
         // Last-line defence: blank/whitespace text must never reach the chat log.
         // Photo bubbles arrive as "[PHOTO:path]" which is not blank, so this is safe.
-        if (text.isBlank()) return
+        if (text.isBlank()) return false
         // Persist reply link separately from the log line so log format stays
         // simple. Looked up by render via getReplyTarget(msgId).
         if (msgId != null && replyToMsgId != null) {
             prefs.edit().putString("$KEY_REPLY_PREFIX$msgId", replyToMsgId).apply()
         }
-        val update = {
+        val update: () -> Boolean = update@{
             val log = messageLogFor(chatId)
+            val originalLength = log.length
             // Embed msgId in author field for all messages so reply-to + status
             // lookups work for incoming too: "Me|{msgId}: text\t{ts}" outgoing,
             // "{contactName}|{msgId}: text\t{ts}" incoming. Legacy entries
@@ -3104,7 +3157,15 @@ class MainActivity : AppCompatActivity() {
             //   (Unicode Line Separator) is visually invisible in normal text but safe here.
             val safeText = text.replace('\n', ' ')
             log.append(authorField).append(": ").append(safeText).append('\t').append(System.currentTimeMillis()).append('\n')
-            prefs.edit().putString(chatLogKey(chatId), log.toString()).apply()
+            val editor = prefs.edit().putString(chatLogKey(chatId), log.toString())
+            val persisted = if (requireCommit) editor.commit() else {
+                editor.apply()
+                true
+            }
+            if (!persisted) {
+                log.setLength(originalLength)
+                return@update false
+            }
             if (binding.chatScreen.visibility == View.VISIBLE && chatId == remoteId) {
                 val lines = splitLogLines(log.toString())
                 prefs.edit().putInt("$KEY_CHAT_READ_PREFIX$chatId", lines.size).apply()
@@ -3116,11 +3177,13 @@ class MainActivity : AppCompatActivity() {
             if (binding.contactListScreen.visibility == View.VISIBLE) {
                 renderContacts()
             }
+            true
         }
-        if (Thread.currentThread() == mainLooper.thread) {
+        return if (Thread.currentThread() == mainLooper.thread) {
             update()
         } else {
-            runOnUiThread(update)
+            runOnUiThread { update() }
+            true
         }
     }
 
@@ -6782,6 +6845,8 @@ class MainActivity : AppCompatActivity() {
         removeListeners()
         incomingListener?.remove()
         incomingListener = null
+        messageInboxListener?.remove()
+        messageInboxListener = null
         incomingTransferListener?.remove()
         incomingTransferListener = null
         photoTransferListeners.forEach { it.remove() }

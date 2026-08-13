@@ -24,8 +24,8 @@ android {
         applicationId = "com.example.xxxlinkxxx"
         minSdk = 23
         targetSdk = 34
-        versionCode = 2003
-        versionName = "2.0.3"
+        versionCode = 2004
+        versionName = "2.0.4-beta"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
@@ -110,6 +110,8 @@ android {
 }
 
 dependencies {
+    testImplementation("junit:junit:4.13.2")
+
     // ===== WebRTC =====
     implementation("io.github.webrtc-sdk:android:144.7559.01")
 
